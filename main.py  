@@ -1,0 +1,48 @@
+# main.py
+import time
+import logging
+from config import POLL_INTERVAL, LOG_LEVEL
+
+# Настройка логирования
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler() # Вывод в консоль
+        # Здесь позже добавим RotatingFileHandler
+    ]
+)
+
+def main_loop():
+    """Главный рабочий цикл бота."""
+    logging.info("Бот 'Bid-Assist' запускается...")
+
+    while True:
+        try:
+            logging.info("Начинаю новый цикл опроса проектов...")
+
+            # 1. fetcher.py -> Получить проекты
+            # projects = fetcher.get_new_projects()
+            logging.info(f"Получено X новых проектов.")
+
+            # 2. store.py + filter.py -> Отфильтровать проекты
+            # suitable_projects = filter.filter_projects(projects)
+            logging.info(f"Осталось Y подходящих проектов после фильтрации.")
+
+            # 3. ai_helper.py -> Оценить сложность и сгенерировать отклик
+            # ...
+
+            # 4. notifier.py -> Отправить уведомления
+            # ...
+
+            logging.info(f"Цикл завершен. Следующий запуск через {POLL_INTERVAL} секунд.")
+            time.sleep(POLL_INTERVAL)
+
+        except Exception as e:
+            logging.error(f"Произошла критическая ошибка в главном цикле: {e}")
+            time.sleep(60) # Пауза в случае серьезной ошибки
+
+if __name__ == "__main__":
+    # Здесь позже будет запуск Telegram-бота
+    # А пока запускаем основной цикл напрямую для отладки
+    main_loop()
