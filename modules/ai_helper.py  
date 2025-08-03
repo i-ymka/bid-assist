@@ -1,0 +1,76 @@
+# bid-assist/modules/ai_helper.py
+
+import logging
+import openai
+from config import OPENAI_API_KEY, LLM_MODEL, USERNAME, PORTFOLIO_URL
+
+# Инициализируем клиент OpenAI, если ключ предоставлен
+client = None
+if OPENAI_API_KEY:
+    try:
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    except Exception as e:
+        logging.error(f"Ошибка при инициализации клиента OpenAI: {e}")
+else:
+    logging.warning("OPENAI_API_KEY не найден. Модуль ai_helper будет работать в режиме деградации.")
+
+def ask_difficulty(project_text: str) -> bool:
+    """
+    Оценивает сложность проекта с помощью LLM.
+    Возвращает True, если сложность "EASY", иначе False.
+    """
+    if not client:
+        logging.info("Пропуск оценки сложности: ключ API OpenAI отсутствует.")
+        return True # В режиме деградации считаем все проекты легкими, чтобы не блокировать пайплайн
+
+    # Обрезаем текст до 4000 символов, как указано в ТЗ
+    trimmed_text = project_text[:4000]
+
+    prompt = f"Return exactly one word: EASY or HARD for a COMPLETE beginner with skills in {','.join(config.WL_KEYWORDS)}. Task: {trimmed_text}"
+
+    try:
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant for a freelancer."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=5,
+            temperature=0.1
+        )
+        answer = response.choices[0].message.content.strip().upper()
+        logging.info(f"LLM оценила сложность как: {answer}")
+        return answer == "EASY"
+    except Exception as e:
+        logging.error(f"Ошибка при вызове API OpenAI для оценки сложности: {e}")
+        return False # В случае ошибки считаем проект сложным, чтобы избежать риска
+
+def generate_bid(title: str, description: str) -> str:
+    """
+    Генерирует черновик отклика на проект.
+    """
+    if not client:
+        logging.info("Пропуск генерации отклика: ключ API OpenAI отсутствует.")
+        return "Bid generation is skipped because the OpenAI API key is not configured."
+
+    # Обрезаем описание до 500 символов для промпта
+    trimmed_description = description[:500]
+
+    prompt = f"Write a concise, 3-line bid proposal. My name is {USERNAME}. My portfolio is here: {PORTFOLIO_URL}. The project title is '{title}'. The task description starts with: '{trimmed_description}'"
+
+    try:
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": "You are writing a bid proposal for a freelance project. Be professional, friendly, and brief."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=150,
+            temperature=0.7
+        )
+        bid_text = response.choices[0].message.content.strip()
+        logging.info("LLM сгенерировала черновик отклика.")
+        return bid_text
+    except Exception as e:
+        logging.error(f"Ошибка при вызове API OpenAI для генерации отклика: {e}")
+        return "Error: Could not generate bid text."
