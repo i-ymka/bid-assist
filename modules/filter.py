@@ -1,48 +1,49 @@
-# bid-assist/modules/filter.py
+# modules/filter.py
 
 import logging
 from typing import List, Dict, Any
 
 from config import BL_KEYWORDS, MIN_BUDGET, MAX_BUDGET
 
+
 def filter_projects(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Фильтрует список проектов по заданным критериям (blacklist, бюджет).
-
-    Args:
-        projects: Список проектов, полученных от fetcher.
-
-    Returns:
-        Отфильтрованный список проектов.
     """
     if not projects:
         return []
 
     suitable_projects = []
     for project in projects:
-        title = project.get('title', '').lower()
-        description = project.get('description', '').lower()
+        # --- ИСПРАВЛЕННЫЙ БЛОК ---
+        # Более надежное получение текста, защищенное от None
+        title_raw = project.get('title')
+        description_raw = project.get('description')
+
+        title = title_raw.lower() if title_raw else ""
+        description = description_raw.lower() if description_raw else ""
+        # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ---
+
         project_text = title + ' ' + description
 
         # 1. Проверка по черному списку (blacklist)
-        if any(bl_word in project_text for bl_word in BL_KEYWORDS):
+        # Проверяем, что есть слова для проверки и что они не пустые
+        if any(bl_word and bl_word in project_text for bl_word in BL_KEYWORDS):
             logging.debug(f"Проект ID {project['id']} отфильтрован по blacklist.")
             continue
 
         # 2. Проверка бюджета
         budget = project.get('budget', {})
         max_budget = budget.get('maximum', 0)
-        # Проверяем, что у проекта есть верхняя граница бюджета
+
         if not max_budget:
             logging.debug(f"Проект ID {project['id']} отфильтрован, т.к. нет max_budget.")
             continue
 
-        # Проверяем, что бюджет в наших рамках
         if not (MIN_BUDGET <= max_budget <= MAX_BUDGET):
             logging.debug(f"Проект ID {project['id']} отфильтрован по бюджету (max: ${max_budget}).")
             continue
 
-        # Если все проверки пройдены, проект нам подходит
         suitable_projects.append(project)
 
     logging.info(f"Фильтрация завершена. Из {len(projects)} проектов осталось {len(suitable_projects)}.")

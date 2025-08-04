@@ -2,6 +2,7 @@
 
 import logging
 import openai
+import config
 from config import OPENAI_API_KEY, LLM_MODEL, USERNAME, PORTFOLIO_URL
 
 # Инициализируем клиент OpenAI, если ключ предоставлен
@@ -14,36 +15,49 @@ if OPENAI_API_KEY:
 else:
     logging.warning("OPENAI_API_KEY не найден. Модуль ai_helper будет работать в режиме деградации.")
 
+
 def ask_difficulty(project_text: str) -> bool:
     """
-    Оценивает сложность проекта с помощью LLM.
-    Возвращает True, если сложность "EASY", иначе False.
+    Оценивает, подходит ли проект под персональные навыки пользователя.
+    Возвращает True, если проект - "GOOD FIT".
     """
     if not client:
         logging.info("Пропуск оценки сложности: ключ API OpenAI отсутствует.")
-        return True # В режиме деградации считаем все проекты легкими, чтобы не блокировать пайплайн
+        return True
 
-    # Обрезаем текст до 4000 символов, как указано в ТЗ
     trimmed_text = project_text[:4000]
 
-    prompt = f"Return exactly one word: EASY or HARD for a COMPLETE beginner with skills in {','.join(config.WL_KEYWORDS)}. Task: {trimmed_text}"
+    # --- НАШ ПЕРСОНАЛЬНЫЙ ПРОМПТ v4.0 ---
+    prompt = (
+        "My core skills are Python scripting, building bots, web scraping, and creating workflows in tools like Make/Zapier. "
+        "I use AI to help me work faster.\n\n"
+        "I am looking for projects that match these skills and can be built from scratch or with standard libraries. "
+        "I want to gain practical backend and automation experience.\n\n"
+        'GOOD FITS are: "Create a Telegram bot for notifications", "Scrape data from a public website", "Connect API A to Google Sheets".\n'
+        'BAD FITS are: "Optimize our complex legacy database", "Debug our custom Salesforce integration", "Build a pixel-perfect front-end UI", '
+        '"Add a feature to our platform that the public API doesn\'t support".\n\n'
+        "Evaluate the task below. Is it a GOOD FIT or a BAD FIT for me? Respond with only one word: GOOD or BAD. "
+        f"Task: {trimmed_text}"
+    )
 
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant for a freelancer."},
+                {"role": "system",
+                 "content": "You are a strict career advisor for a Python developer, filtering out unsuitable jobs."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=5,
-            temperature=0.1
+            temperature=0.0
         )
         answer = response.choices[0].message.content.strip().upper()
-        logging.info(f"LLM оценила сложность как: {answer}")
-        return answer == "EASY"
+        logging.info(f"LLM (Personal Fit v4.0) evaluated project as: {answer}")
+        # Возвращаем True, только если ответ - "GOOD"
+        return "GOOD" in answer
     except Exception as e:
         logging.error(f"Ошибка при вызове API OpenAI для оценки сложности: {e}")
-        return False # В случае ошибки считаем проект сложным, чтобы избежать риска
+        return False
 
 def generate_bid(title: str, description: str) -> str:
     """
