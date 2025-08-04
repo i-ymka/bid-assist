@@ -1,11 +1,9 @@
-# bid-assist/modules/ai_helper.py
+# modules/ai_helper.py (переработанная версия)
 
 import logging
 import openai
-import config
 from config import OPENAI_API_KEY, LLM_MODEL, USERNAME, PORTFOLIO_URL
 
-# Инициализируем клиент OpenAI, если ключ предоставлен
 client = None
 if OPENAI_API_KEY:
     try:
@@ -16,59 +14,59 @@ else:
     logging.warning("OPENAI_API_KEY не найден. Модуль ai_helper будет работать в режиме деградации.")
 
 
-def ask_difficulty(project_text: str) -> bool:
+def rate_difficulty(project_text: str) -> str:
     """
-    Оценивает, подходит ли проект под персональные навыки пользователя.
-    Возвращает True, если проект - "GOOD FIT".
+    Оценивает сложность проекта по шкале и возвращает строку: EASY, MEDIUM, HARD.
     """
     if not client:
-        logging.info("Пропуск оценки сложности: ключ API OpenAI отсутствует.")
-        return True
+        return "N/A"  # Возвращаем "Not Applicable", если нет ключа
 
     trimmed_text = project_text[:4000]
 
-    # --- НАШ ПЕРСОНАЛЬНЫЙ ПРОМПТ v4.0 ---
     prompt = (
-        "My core skills are Python scripting, building bots, web scraping, and creating workflows in tools like Make/Zapier. "
-        "I use AI to help me work faster.\n\n"
-        "I am looking for projects that match these skills and can be built from scratch or with standard libraries. "
-        "I want to gain practical backend and automation experience.\n\n"
-        'GOOD FITS are: "Create a Telegram bot for notifications", "Scrape data from a public website", "Connect API A to Google Sheets".\n'
-        'BAD FITS are: "Optimize our complex legacy database", "Debug our custom Salesforce integration", "Build a pixel-perfect front-end UI", '
-        '"Add a feature to our platform that the public API doesn\'t support".\n\n'
-        "Evaluate the task below. Is it a GOOD FIT or a BAD FIT for me? Respond with only one word: GOOD or BAD. "
-        f"Task: {trimmed_text}"
+        "Rate the difficulty of the following task for a Python developer skilled in automation and APIs. "
+        "The rating should be one of three levels:\n"
+        "- EASY: Standard task, few unknowns, likely doable in 1-2 days.\n"
+        "- MEDIUM: Requires some research, has tricky parts, or involves integrating multiple systems.\n"
+        "- HARD: Complex, high risk, requires deep specialist knowledge (e.g., legacy systems, complex algorithms, high-load optimization).\n"
+        f"Respond with a single word: EASY, MEDIUM, or HARD. Task: {trimmed_text}"
     )
 
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
-                {"role": "system",
-                 "content": "You are a strict career advisor for a Python developer, filtering out unsuitable jobs."},
+                {"role": "system", "content": "You are a concise tech project evaluator."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=5,
             temperature=0.0
         )
         answer = response.choices[0].message.content.strip().upper()
-        logging.info(f"LLM (Personal Fit v4.0) evaluated project as: {answer}")
-        # Возвращаем True, только если ответ - "GOOD"
-        return "GOOD" in answer
+        # Проверяем, что ответ один из ожидаемых, иначе возвращаем "Unknown"
+        if answer in ["EASY", "MEDIUM", "HARD"]:
+            logging.info(f"LLM оценила сложность как: {answer}")
+            return answer
+        else:
+            logging.warning(f"LLM вернула неожиданный ответ: '{answer}'. Помечаем как 'Unknown'.")
+            return "Unknown"
     except Exception as e:
         logging.error(f"Ошибка при вызове API OpenAI для оценки сложности: {e}")
-        return False
+        return "Error"
+
 
 def generate_bid(title: str, description: str) -> str:
     """
-    Генерирует черновик отклика на проект.
+    Генерирует черновик отклика на проект (защищенная версия).
     """
     if not client:
-        logging.info("Пропуск генерации отклика: ключ API OpenAI отсутствует.")
         return "Bid generation is skipped because the OpenAI API key is not configured."
 
-    # Обрезаем описание до 500 символов для промпта
-    trimmed_description = description[:500]
+    # --- ИСПРАВЛЕННЫЙ БЛОК ---
+    # Проверяем, что description не является None, прежде чем его резать
+    safe_description = description if description else ""
+    trimmed_description = safe_description[:500]
+    # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ---
 
     prompt = f"Write a concise, 3-line bid proposal. My name is {USERNAME}. My portfolio is here: {PORTFOLIO_URL}. The project title is '{title}'. The task description starts with: '{trimmed_description}'"
 
@@ -76,7 +74,7 @@ def generate_bid(title: str, description: str) -> str:
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
-                {"role": "system", "content": "You are writing a bid proposal for a freelance project. Be professional, friendly, and brief."},
+                {"role": "system", "content": "You are writing a bid proposal. Be professional, friendly, and brief."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=150,

@@ -9,7 +9,7 @@ from config import LOG_LEVEL, TELEGRAM_BOT_TOKEN, POLL_INTERVAL
 from modules.fetcher import get_new_projects
 from modules.store import ProjectStore
 from modules.filter import filter_projects
-from modules.ai_helper import ask_difficulty, generate_bid
+from modules.ai_helper import rate_difficulty, generate_bid
 from modules.notifier import send_telegram_notification, escape_markdown
 from modules.bidder import send_bid  # <--- Добавили импорт
 
@@ -21,7 +21,10 @@ store = ProjectStore()
 
 
 async def polling_cycle(context: ContextTypes.DEFAULT_TYPE):
-    """Основная логика, которая выполняется каждые N секунд."""
+    """
+    Основная логика (версия "AI-советник").
+    Ищет, фильтрует, получает оценку и отправляет ВСЕ подходящие проекты.
+    """
     logging.info("--- Начинаю новый цикл опроса проектов ---")
 
     projects = get_new_projects()
@@ -33,30 +36,33 @@ async def polling_cycle(context: ContextTypes.DEFAULT_TYPE):
     suitable_projects = filter_projects(unprocessed_projects)
     if not suitable_projects: return
 
-    logging.info(f"Найдено {len(suitable_projects)} проектов для AI-оценки.")
+    logging.info(f"Найдено {len(suitable_projects)} проектов для AI-оценки и отправки.")
 
+    # НОВЫЙ ЦИКЛ: больше нет if/else, отправляем каждый проект
     for project in suitable_projects:
         project_id = project['id']
         title = project.get('title', '')
         description = project.get('description', '')
         full_text = f"{title}\n\n{description}"
 
-        if ask_difficulty(full_text):
-            logging.info(f"Проект ID {project_id} помечен как 'EASY'. Генерирую отклик...")
-            draft_bid = generate_bid(title, description)
+        # 1. Получаем оценку от AI
+        difficulty_rating = rate_difficulty(full_text)
 
-            # Временно сохраняем данные для отправки ставки
-            max_budget = project.get('budget', {}).get('maximum', 0)
-            context.bot_data.setdefault('pending_bids', {})[project_id] = {
-                'draft_bid': draft_bid,
-                'amount': max_budget
-            }
+        # 2. Генерируем отклик
+        draft_bid = generate_bid(title, description)
 
-            await send_telegram_notification(project, draft_bid)
-            store.add_project(project_id)  # Сразу в базу, чтобы не предлагать снова
-        else:
-            logging.info(f"Проект ID {project_id} помечен как 'HARD'. Пропускаем.")
-            store.add_project(project_id)
+        # 3. Сохраняем данные для отправки ставки (как и раньше)
+        max_budget = project.get('budget', {}).get('maximum', 0)
+        context.bot_data.setdefault('pending_bids', {})[project_id] = {
+            'draft_bid': draft_bid,
+            'amount': max_budget
+        }
+
+        # 4. Отправляем уведомление в Telegram с новой информацией
+        await send_telegram_notification(project, draft_bid, difficulty_rating)
+
+        # 5. Сразу добавляем в базу, чтобы не предлагать повторно
+        store.add_project(project_id)
 
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

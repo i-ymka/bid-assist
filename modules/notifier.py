@@ -12,44 +12,59 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
 # Telegram требует экранирования специальных символов для разметки MarkdownV2
 def escape_markdown(text: str) -> str:
-    """Экранирует специальные символы для Telegram MarkdownV2."""
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return helpers.escape_markdown(str(text), version=2, entity_type=helpers.MessageEntityType.TEXT)
-
-
-async def send_telegram_notification(project: Dict[str, Any], draft_bid: str):
     """
-    Формирует и отправляет уведомление в Telegram с инлайн-кнопками.
+    Агрессивно экранирует все специальные символы для Telegram MarkdownV2.
+    """
+    # Список всех символов, которые Telegram требует экранировать
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+
+    # Создаем безопасную копию текста
+    safe_text = str(text)
+
+    # Проходим по каждому спецсимволу и добавляем перед ним \
+    for char in escape_chars:
+        safe_text = safe_text.replace(char, f'\\{char}')
+
+    return safe_text
+
+
+async def send_telegram_notification(project: Dict[str, Any], draft_bid: str, difficulty_rating: str):
+    """
+    Формирует и отправляет уведомление в Telegram с оценкой от AI.
     """
     project_id = project['id']
+
+    # Экранируем все текстовые переменные ПЕРЕД сборкой сообщения
     title = escape_markdown(project.get('title', 'Без заголовка'))
 
-    # Формируем URL проекта
-    project_url = f"https://www.freelancer.com/projects/{project_id}"
+    # --- НАШЕ ИСПРАВЛЕНИЕ ---
+    raw_project_url = f"https://www.freelancer.com/projects/{project_id}"
+    project_url = escape_markdown(raw_project_url)
+    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
-    # Формируем информацию о бюджете
     budget = project.get('budget', {})
     currency = project.get('currency', {}).get('code', 'USD')
     min_budget = budget.get('minimum', 0)
     max_budget = budget.get('maximum', 0)
     budget_str = escape_markdown(f"{min_budget} - {max_budget} {currency}")
 
-    # Информация о заказчике
     owner = project.get('owner', {})
     owner_name = escape_markdown(owner.get('username', 'N/A'))
 
-    # Формируем текст сообщения
+    escaped_draft_bid = escape_markdown(draft_bid)
+    escaped_difficulty = escape_markdown(difficulty_rating)
+
     text = (
         f"*{title}*\n\n"
+        f"🧠 *AI Оценка:* `{escaped_difficulty}`\n"
         f"*Бюджет:* {budget_str}\n"
         f"*Заказчик:* {owner_name}\n\n"
         f"*🔗 Ссылка на проект:*\n{project_url}\n\n"
         f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         f"*🤖 Сгенерированный отклик:*\n"
-        f"```\n{escape_markdown(draft_bid)}\n```"
+        f"```\n{escaped_draft_bid}\n```"
     )
 
-    # Создаем инлайн-кнопки
     keyboard = [
         [
             InlineKeyboardButton("✅ Отправить отклик", callback_data=f"send_{project_id}"),
