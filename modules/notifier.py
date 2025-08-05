@@ -5,7 +5,7 @@ from datetime import datetime
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, helpers
 from typing import Dict, Any
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_IDS
 
 # Создаем один экземпляр бота для всего модуля
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -49,38 +49,38 @@ async def send_telegram_notification(project: Dict[str, Any], draft_bid: str, di
     budget_str = escape_markdown(f"{min_budget} - {max_budget} {currency}")
 
     owner = project.get('owner', {})
-    owner_name = escape_markdown(owner.get('username', 'N/A'))
+    #owner_name = escape_markdown(owner.get('username', 'N/A'))
 
     escaped_draft_bid = escape_markdown(draft_bid)
     escaped_difficulty = escape_markdown(difficulty_rating)
 
     text = (
         f"*{title}*\n\n"
-        f"🧠 *AI Оценка:* `{escaped_difficulty}`\n"
-        f"*Бюджет:* {budget_str}\n"
-        f"*Заказчик:* {owner_name}\n\n"
-        f"*🔗 Ссылка на проект:*\n{project_url}\n\n"
+        f"🧠 *AI Rating:* `{escaped_difficulty}`\n"
+        f"💰 *Budget:* {budget_str}\n"
+        f"🔗 *Project link:*\n{project_url}\n\n"
         f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-        f"*🤖 Сгенерированный отклик:*\n"
+        f"🤖 *Generated response:*\n"
         f"```\n{escaped_draft_bid}\n```"
     )
 
     keyboard = [
         [
-            InlineKeyboardButton("✅ Отправить отклик", callback_data=f"send_{project_id}"),
-            InlineKeyboardButton("❌ Пропустить", callback_data=f"skip_{project_id}"),
+            InlineKeyboardButton("✅ Send bid", callback_data=f"send_{project_id}"),
+            InlineKeyboardButton("❌ Skip", callback_data=f"skip_{project_id}"),
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    try:
-        await bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
-            text=text,
-            parse_mode='MarkdownV2',
-            reply_markup=reply_markup,
-            disable_web_page_preview=True
-        )
-        logging.info(f"Уведомление по проекту ID {project_id} успешно отправлено в Telegram.")
-    except Exception as e:
-        logging.error(f"Ошибка при отправке уведомления в Telegram для проекта ID {project_id}: {e}")
+    for chat_id in TELEGRAM_CHAT_IDS:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode='MarkdownV2',
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+            logging.info(f"Уведомление по проекту ID {project_id} успешно отправлено в чат {chat_id}.")
+        except Exception as e:
+            logging.error(f"Ошибка при отправке уведомления в чат {chat_id} для проекта ID {project_id}: {e}")

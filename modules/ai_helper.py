@@ -26,8 +26,8 @@ def rate_difficulty(project_text: str) -> str:
     prompt = (
         "Rate the difficulty of the following task for a Python developer skilled in automation and APIs. "
         "The rating should be one of three levels:\n"
-        "- EASY: Standard task, few unknowns, likely doable in 1-2 days.\n"
-        "- MEDIUM: Requires some research, has tricky parts, or involves integrating multiple systems.\n"
+        "- EASY: Standard task, few unknowns, likely doable in 1 days with or w/o AI help.\n"
+        "- MEDIUM: Requires some research, has tricky parts, or involves integrating multiple systems, but possible with AI help.\n"
         "- HARD: Complex, high risk, requires deep specialist knowledge (e.g., legacy systems, complex algorithms, high-load optimization).\n"
         f"Respond with a single word: EASY, MEDIUM, or HARD. Task: {trimmed_text}"
     )
@@ -57,31 +57,49 @@ def rate_difficulty(project_text: str) -> str:
 
 def generate_bid(title: str, description: str) -> str:
     """
-    Генерирует черновик отклика на проект (защищенная версия).
+    Генерирует черновик отклика по очень строгим правилам.
     """
     if not client:
         return "Bid generation is skipped because the OpenAI API key is not configured."
 
-    # --- ИСПРАВЛЕННЫЙ БЛОК ---
-    # Проверяем, что description не является None, прежде чем его резать
     safe_description = description if description else ""
     trimmed_description = safe_description[:500]
-    # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ---
 
-    prompt = f"Write a concise, 3-line bid proposal. My name is {USERNAME}. My portfolio is here: {PORTFOLIO_URL}. The project title is '{title}'. The task description starts with: '{trimmed_description}'"
+    # --- НОВЫЙ, СТРОГИЙ ПРОМПТ ---
+    prompt = (
+        f"You are writing a short, direct bid proposal for a project on Freelancer.com.\n"
+        f"Your response MUST be 2-3 sentences only.\n\n"
+        f"**My Details:**\n"
+        f"- Name: {USERNAME}\n"
+        f"- Role: Senior Developer\n"
+        f"- Portfolio: {PORTFOLIO_URL}\n\n"
+        f"**Project Details:**\n"
+        f"Title: {title}\n"
+        f"Description: {trimmed_description}\n\n"
+        f"**Instructions:**\n"
+        f"1. Start DIRECTLY with a simple greeting like 'Hello!' or 'Hi,'.\n"
+        f"2. Immediately state my name and concisely connect my skills to the project's needs.\n"
+        f"3. Mention my portfolio naturally within the text.\n\n"
+        f"**CRITICAL RULES: DO NOT...**\n"
+        f"- DO NOT use a formal salutation like 'Dear...'.\n"
+        f"- DO NOT use a formal closing like 'Best regards,' or 'Sincerely,'.\n"
+        f"- DO NOT sign my name at the end. The proposal must end with the last sentence of the main text."
+    )
 
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
+            # Обновляем системное сообщение для большей точности
             messages=[
-                {"role": "system", "content": "You are writing a bid proposal. Be professional, friendly, and brief."},
+                {"role": "system",
+                 "content": "You write concise, direct, and informal bid proposals for freelance websites, following all rules strictly."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=150,
             temperature=0.7
         )
         bid_text = response.choices[0].message.content.strip()
-        logging.info("LLM сгенерировала черновик отклика.")
+        logging.info("LLM сгенерировала черновик отклика по новому промпту.")
         return bid_text
     except Exception as e:
         logging.error(f"Ошибка при вызове API OpenAI для генерации отклика: {e}")
