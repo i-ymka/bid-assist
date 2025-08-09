@@ -28,19 +28,15 @@ def escape_markdown(text: str) -> str:
     return safe_text
 
 
-async def send_telegram_notification(project: Dict[str, Any], draft_bid: str, difficulty_rating: str):
+async def send_telegram_notification(project: Dict[str, Any], draft_bid: str, difficulty_rating: str, summary: str):
     """
-    Формирует и отправляет уведомление в Telegram с оценкой от AI.
+    Формирует и отправляет уведомление с ПРАВИЛЬНО экранированным хештегом.
     """
+    # ... (код для project_id, title, project_url, budget_str, owner_name без изменений) ...
     project_id = project['id']
-
-    # Экранируем все текстовые переменные ПЕРЕД сборкой сообщения
-    title = escape_markdown(project.get('title', 'Без заголовка'))
-
-    # --- НАШЕ ИСПРАВЛЕНИЕ ---
+    title = escape_markdown(project.get('title', 'No Title'))
     raw_project_url = f"https://www.freelancer.com/projects/{project_id}"
     project_url = escape_markdown(raw_project_url)
-    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
     budget = project.get('budget', {})
     currency = project.get('currency', {}).get('code', 'USD')
@@ -49,38 +45,36 @@ async def send_telegram_notification(project: Dict[str, Any], draft_bid: str, di
     budget_str = escape_markdown(f"{min_budget} - {max_budget} {currency}")
 
     owner = project.get('owner', {})
-    #owner_name = escape_markdown(owner.get('username', 'N/A'))
+    owner_name = escape_markdown(owner.get('username', 'N/A'))
 
+    # Экранируем все текстовые части
+    escaped_summary = escape_markdown(summary)
     escaped_draft_bid = escape_markdown(draft_bid)
-    escaped_difficulty = escape_markdown(difficulty_rating)
+
+    # --- ГЛАВНОЕ ИСПРАВЛЕНИЕ ---
+    # Создаем хештег и ЭКРАНИРУЕМ его
+    hashtag_rating = f"\\#{difficulty_rating.upper()}"
+    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
     text = (
         f"*{title}*\n\n"
-        f"🧠 *AI Rating:* `{escaped_difficulty}`\n"
-        f"💰 *Budget:* {budget_str}\n"
+        f"📝 *Summary:* {escaped_summary}\n"
+        f"💰 *Budget:* {budget_str}\n\n"
         f"🔗 *Project link:*\n{project_url}\n\n"
-        f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-        f"🤖 *Generated response:*\n"
-        f"```\n{escaped_draft_bid}\n```"
+        f"👇 *Bid:*\n"
+        f"```\n{escaped_draft_bid}\n```\n"
+        f"{hashtag_rating}"
     )
 
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Send bid", callback_data=f"send_{project_id}"),
-            InlineKeyboardButton("❌ Skip", callback_data=f"skip_{project_id}"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
+    # ... (код для цикла отправки без изменений) ...
     for chat_id in TELEGRAM_CHAT_IDS:
         try:
             await bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 parse_mode='MarkdownV2',
-                reply_markup=reply_markup,
                 disable_web_page_preview=True
             )
-            logging.info(f"Уведомление по проекту ID {project_id} успешно отправлено в чат {chat_id}.")
+            logging.info(f"Notification for project ID {project_id} sent successfully to chat {chat_id}.")
         except Exception as e:
-            logging.error(f"Ошибка при отправке уведомления в чат {chat_id} для проекта ID {project_id}: {e}")
+            logging.error(f"Error sending notification to chat {chat_id} for project ID {project_id}: {e}")

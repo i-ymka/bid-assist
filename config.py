@@ -23,6 +23,7 @@ WL_KEYWORDS = [word.strip().lower() for word in os.getenv("WL", "").split(',') i
 BL_KEYWORDS = [word.strip().lower() for word in os.getenv("BL", "").split(',') if word.strip()]
 MIN_BUDGET = int(os.getenv("MIN_BUDGET", 20))
 MAX_BUDGET = int(os.getenv("MAX_BUDGET", 150))
+SKILL_IDS = [int(skill_id.strip()) for skill_id in os.getenv("SKILL_IDS", "").split(',') if skill_id.strip()]
 
 # --- Application Settings ---
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 300))

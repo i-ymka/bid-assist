@@ -1,7 +1,8 @@
-# modules/ai_helper.py (переработанная версия)
+# modules/ai_helper.py (финальная версия с 3-частным ответом)
 
 import logging
 import openai
+from typing import Tuple
 from config import OPENAI_API_KEY, LLM_MODEL, USERNAME, PORTFOLIO_URL
 
 client = None
@@ -14,93 +15,70 @@ else:
     logging.warning("OPENAI_API_KEY не найден. Модуль ai_helper будет работать в режиме деградации.")
 
 
-def rate_difficulty(project_text: str) -> str:
+def get_ai_summary(title: str, description: str) -> Tuple[str, str, str]:
     """
-    Оценивает сложность проекта по шкале и возвращает строку: EASY, MEDIUM, HARD.
-    """
-    if not client:
-        return "N/A"  # Возвращаем "Not Applicable", если нет ключа
-
-    trimmed_text = project_text[:4000]
-
-    prompt = (
-        "Rate the difficulty of the following task for a Python developer skilled in automation and APIs. "
-        "The rating should be one of three levels:\n"
-        "- EASY: Standard task, few unknowns, likely doable in 1 days with or w/o AI help.\n"
-        "- MEDIUM: Requires some research, has tricky parts, or involves integrating multiple systems, but possible with AI help.\n"
-        "- HARD: Complex, high risk, requires deep specialist knowledge (e.g., legacy systems, complex algorithms, high-load optimization).\n"
-        f"Respond with a single word: EASY, MEDIUM, or HARD. Task: {trimmed_text}"
-    )
-
-    try:
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a concise tech project evaluator."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=5,
-            temperature=0.0
-        )
-        answer = response.choices[0].message.content.strip().upper()
-        # Проверяем, что ответ один из ожидаемых, иначе возвращаем "Unknown"
-        if answer in ["EASY", "MEDIUM", "HARD"]:
-            logging.info(f"LLM оценила сложность как: {answer}")
-            return answer
-        else:
-            logging.warning(f"LLM вернула неожиданный ответ: '{answer}'. Помечаем как 'Unknown'.")
-            return "Unknown"
-    except Exception as e:
-        logging.error(f"Ошибка при вызове API OpenAI для оценки сложности: {e}")
-        return "Error"
-
-
-def generate_bid(title: str, description: str) -> str:
-    """
-    Генерирует черновик отклика по очень строгим правилам.
+    ОДНИМ запросом к LLM получает рейтинг, умное резюме и ГИПЕР-СПЕЦИФИЧНЫЙ отклик.
     """
     if not client:
-        return "Bid generation is skipped because the OpenAI API key is not configured."
+        return ("N/A", "AI is not configured.", "AI is not configured.")
 
     safe_description = description if description else ""
-    trimmed_description = safe_description[:500]
+    trimmed_description = safe_description[:2000]
 
-    # --- НОВЫЙ, СТРОГИЙ ПРОМПТ ---
+    # --- УЛЬТИМАТИВНЫЙ ПРОМПТ С ПЕРСОНОЙ И СТИЛЕМ ---
     prompt = (
-        f"You are writing a short, direct bid proposal for a project on Freelancer.com.\n"
-        f"Your response MUST be 2-3 sentences only.\n\n"
-        f"**My Details:**\n"
-        f"- Name: {USERNAME}\n"
-        f"- Role: Senior Developer\n"
-        f"- Portfolio: {PORTFOLIO_URL}\n\n"
+        f"You are my expert freelance assistant named 'BlueLion'. Your tone is confident, direct, and hyper-specific. Use simple English.\n"
+        f"Analyze the project below and provide three outputs separated by '---'.\n\n"
         f"**Project Details:**\n"
-        f"Title: {title}\n"
-        f"Description: {trimmed_description}\n\n"
-        f"**Instructions:**\n"
-        f"1. Start DIRECTLY with a simple greeting like 'Hello!' or 'Hi,'.\n"
-        f"2. Immediately state my name and concisely connect my skills to the project's needs.\n"
-        f"3. Mention my portfolio naturally within the text.\n\n"
-        f"**CRITICAL RULES: DO NOT...**\n"
-        f"- DO NOT use a formal salutation like 'Dear...'.\n"
-        f"- DO NOT use a formal closing like 'Best regards,' or 'Sincerely,'.\n"
-        f"- DO NOT sign my name at the end. The proposal must end with the last sentence of the main text."
+        f"- Title: {title}\n"
+        f"- Description: {trimmed_description}\n\n"
+        f"--- TASK 1: Difficulty Rating ---\n"
+        f"Rate the task difficulty for accomplish this task with the help of ai if I will follow all its instructions (EASY, MEDIUM, HARD).\n\n"
+        f"--- TASK 2: Conversational Summary ---\n"
+        f"Explain the project's goal to me in a friendly, conversational tone, as if talking to a colleague. Get straight to the point. "
+        f"**AVOID** robotic phrases like 'The project aims to' or 'The project involves'. Instead, say something like 'You will do...' or 'They want a...'. "
+        f"Mention if it's a new build, a fix, or a long-term role.\n\n"
+        f"--- TASK 3: Hyper-Specific Bid Proposal ---\n"
+        f"Write a 2-3 sentence bid proposal from my persona. It MUST be confident, friendly and directly reference key technologies from the project description.\n"
+        f"**CRITICAL:** Do NOT just say 'I'm skilled in Python'. If the project is about 'PyQt', say 'I have strong experience with PyQt'. If it's about 'Laravel', say 'I have extensive experience in Laravel'. "
+        f"Here are examples of the **PERFECT** style:\n"
+        f"- 'Hi, I’m BlueLion, expert in AI/ML and data migration. I can convert XML to PySpark with schema checks, filtering, and metadata. I use smart AI to make the process fast and clean. Check my work: {PORTFOLIO_URL}.'\n"
+        f"- 'Hi, I’m BlueLion, expert in API integration. I can connect your custom API with DUDA and set real-time updates from Printify. I know DUDA and Printify well. See my work: {PORTFOLIO_URL}.'\n"
+        f"**Rules:** Start with 'Hi, I'm {USERNAME},...'. Mention the portfolio: {PORTFOLIO_URL}. Do NOT use formal closings.\n\n"
+        f"--- YOUR RESPONSE FORMAT ---\n"
+        f"RATING: [Your rating word]\n"
+        f"---\n"
+        f"SUMMARY: [Your conversational, insightful summary]\n"
+        f"---\n"
+        f"BID: [Your hyper-specific, confident proposal]"
     )
 
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
-            # Обновляем системное сообщение для большей точности
             messages=[
                 {"role": "system",
-                 "content": "You write concise, direct, and informal bid proposals for freelance websites, following all rules strictly."},
+                 "content": "You are a confident, expert freelance assistant named BlueLion. You write hyper-specific, compelling bids and summaries."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=150,
+            max_tokens=400,  # Немного увеличим лимит для более качественных ответов
             temperature=0.7
         )
-        bid_text = response.choices[0].message.content.strip()
-        logging.info("LLM сгенерировала черновик отклика по новому промпту.")
-        return bid_text
+        full_response = response.choices[0].message.content.strip()
+
+        # --- Парсинг 3-частного ответа (остается без изменений) ---
+        parts = full_response.split("---")
+        if len(parts) != 3:
+            logging.warning(f"AI did not return 3 parts. Response: {full_response}")
+            return "Unknown", "Could not parse AI summary.", full_response
+
+        rating = parts[0].replace("RATING:", "").strip()
+        summary = parts[1].replace("SUMMARY:", "").strip()
+        bid_text = parts[2].replace("BID:", "").strip()
+
+        logging.info(f"AI summary received. Rating: {rating}")
+        return rating, summary, bid_text
+
     except Exception as e:
-        logging.error(f"Ошибка при вызове API OpenAI для генерации отклика: {e}")
-        return "Error: Could not generate bid text."
+        logging.error(f"Error calling OpenAI API for summary: {e}")
+        return "Error", "AI Error", "Could not generate AI summary."
