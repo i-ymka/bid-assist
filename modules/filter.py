@@ -1,62 +1,51 @@
-# modules/filter.py (СПЕЦИАЛЬНАЯ ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ - "ГРОМКИЙ ФИЛЬТР" v2)
+# modules/filter.py (ФИНАЛЬНАЯ, "БОЕВАЯ" ВЕРСИЯ БЕЗ ДИАГНОСТИКИ И ANTI-SKILLS)
 
 import logging
 from typing import List, Dict, Any
 
-# --- ИСПРАВЛЕННЫЙ ИМПОРТ ---
-# Мы импортируем SKILL_IDS, а не REQUIRED_SKILLS_SET
 from config import BL_KEYWORDS, MIN_BUDGET, MAX_BUDGET, SKILL_IDS
 
-# --- Создаем set ЗДЕСЬ, внутри файла ---
+# Создаем множество из наших проверенных ID для быстрой проверки
 REQUIRED_SKILLS_SET = set(SKILL_IDS)
 
 
 def filter_projects(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Выполняет финальную, строгую проверку проекта на основе полных данных.
+    """
     if not projects:
         return []
 
     suitable_projects = []
     for project in projects:
-        project_id = project.get('id', 'N/A')
-        project_title = project.get('title', 'No Title')
-
-        # --- БЛОК ДИАГНОСТИКИ НАВЫКОВ ---
+        # --- "ЖЕЛЕЗНЫЙ ЗАНАВЕС" ---
         project_skills = project.get('jobs')
         if not project_skills:
-            logging.debug(f"DIAGNOSTIC (ID: {project_id}): Проект отброшен, так как у него нет поля 'jobs'.")
-            continue
+            continue  # Если у проекта нет навыков, он нам не подходит
 
         project_skill_ids = {skill['id'] for skill in project_skills}
-        intersection = REQUIRED_SKILLS_SET.intersection(project_skill_ids)
 
-        if not intersection:
-            logging.debug(f"DIAGNOSTIC (ID: {project_id}): Проект отброшен, так как нет пересечения по навыкам.")
+        # Если нет НИ ОДНОГО совпадения с нашими навыками, проект отбрасывается
+        if not REQUIRED_SKILLS_SET.intersection(project_skill_ids):
             continue
+        # --- КОНЕЦ "ЖЕЛЕЗНОГО ЗАНАВЕСА" ---
 
-        # ЕСЛИ МЫ ДОШЛИ ДО СЮДА, ЗНАЧИТ, БОТ СЧИТАЕТ ПРОЕКТ РЕЛЕВАНТНЫМ.
-        # ТЕПЕРЬ МЫ ЗАСТАВИМ ЕГО ОБЪЯСНИТЬ, ПОЧЕМУ.
-        logging.info("=" * 50)
-        logging.info(f"!!! DIAGNOSTIC: ПРОЕКТ ПРОШЕЛ ФИЛЬТР ПО НАВЫКАМ !!!")
-        logging.info(f"    ID Проекта: {project_id}")
-        logging.info(f"    Название: {project_title}")
-        logging.info(f"    НАЙДЕННЫЕ СОВПАДЕНИЯ ПО ID НАВЫКОВ: {intersection}")
-        logging.info(f"    Все навыки проекта (для справки): {[skill.get('name') for skill in project_skills]}")
-        logging.info("=" * 50)
-        # --- КОНЕЦ БЛОКА ДИАГНОСТИКИ ---
-
-        # --- Остальные проверки (остаются без изменений) ---
+        # --- Остальные проверки (бюджет и черный список) ---
         title = (project.get('title') or '').lower()
         description = (project.get('description') or '').lower()
         project_text = title + ' ' + description
 
         if any(bl_word and bl_word in project_text for bl_word in BL_KEYWORDS):
+            logging.debug(f"Проект ID {project['id']} отфильтрован по blacklist.")
             continue
 
         budget = project.get('budget', {})
         max_budget = budget.get('maximum', 0)
         if not max_budget or not (MIN_BUDGET <= max_budget <= MAX_BUDGET):
+            logging.debug(f"Проект ID {project['id']} отфильтрован по бюджету.")
             continue
 
         suitable_projects.append(project)
 
+    logging.info(f"Финальная фильтрация завершена. Из {len(projects)} проектов осталось {len(suitable_projects)}.")
     return suitable_projects
