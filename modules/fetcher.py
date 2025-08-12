@@ -1,24 +1,26 @@
+# modules/fetcher.py
+
 import logging
 import requests
 from typing import List, Dict, Any
 
-from config import FREELANCER_OAUTH_TOKEN, WL_KEYWORDS, MIN_BUDGET, SKILL_IDS
+# --- ОБНОВЛЕННЫЙ ИМПОРТ (БЕЗ WL_KEYWORDS) ---
+from config import FREELANCER_OAUTH_TOKEN, MIN_BUDGET, SKILL_IDS
 from constants import FREELANCER_API_BASE_URL, PROJECTS_ENDPOINT
+
 
 def get_new_projects() -> List[Dict[str, Any]]:
     """
-    Запрашивает новые проекты с Freelancer.com через API,
-    используя фильтрацию по ID навыков.
+    Запрашивает новые проекты, полагаясь ИСКЛЮЧИТЕЛЬНО на фильтрацию по ID навыков.
     """
     headers = {
         "Freelancer-OAuth-V1": FREELANCER_OAUTH_TOKEN,
         "Content-Type": "application/json",
     }
 
-    # --- ОБНОВЛЕННЫЕ ПАРАМЕТРЫ ЗАПРОСА ---
+    # --- ФИНАЛЬНЫЕ, УПРОЩЕННЫЕ ПАРАМЕТРЫ ЗАПРОСА ---
     params = {
-        "query": " ".join(WL_KEYWORDS),  # Поиск по ключевым словам (дополнительно)
-        "jobs[]": SKILL_IDS,  # Фильтрация по ID навыков (САМОЕ ВАЖНОЕ)
+        "jobs[]": SKILL_IDS,  # Наш главный и единственный фильтр
         "project_types[]": "fixed",
         "min_budget": MIN_BUDGET,
         "limit": 50
@@ -28,6 +30,7 @@ def get_new_projects() -> List[Dict[str, Any]]:
     logging.info(f"Отправка запроса на {url} с параметрами: {params}")
 
     try:
+        # ... (остальной код функции try/except остается без изменений)
         response = requests.get(url, headers=headers, params=params, verify=True)
 
         rate_limit_remaining = response.headers.get('X-RateLimit-Remaining')

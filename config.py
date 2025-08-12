@@ -19,7 +19,6 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 # ... (остальной код остается таким же, как в вашей работающей версии)
 
 # --- Filtering Settings ---
-WL_KEYWORDS = [word.strip().lower() for word in os.getenv("WL", "").split(',') if word.strip()]
 BL_KEYWORDS = [word.strip().lower() for word in os.getenv("BL", "").split(',') if word.strip()]
 MIN_BUDGET = int(os.getenv("MIN_BUDGET", 20))
 MAX_BUDGET = int(os.getenv("MAX_BUDGET", 150))
