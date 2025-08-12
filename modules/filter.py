@@ -10,6 +10,15 @@ from config import BL_KEYWORDS, MIN_BUDGET, MAX_BUDGET, SKILL_IDS
 # Это профессиональная оптимизация, которая ускоряет работу
 REQUIRED_SKILLS_SET = set(SKILL_IDS)
 
+# modules/filter.py (финальная версия с защитой от None в навыках)
+
+import logging
+from typing import List, Dict, Any
+
+from config import BL_KEYWORDS, MIN_BUDGET, MAX_BUDGET, SKILL_IDS
+
+REQUIRED_SKILLS_SET = set(SKILL_IDS)
+
 
 def filter_projects(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
@@ -21,16 +30,20 @@ def filter_projects(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     suitable_projects = []
     for project in projects:
-        # --- НАШ НОВЫЙ "ЖЕЛЕЗНЫЙ" ФИЛЬТР ---
-        project_skills = project.get('jobs', [])
-        # Извлекаем ID навыков из объекта проекта
+        # --- ИСПРАВЛЕННЫЙ "ЖЕЛЕЗНЫЙ" ФИЛЬТР ---
+        project_skills = project.get('jobs')  # Получаем список навыков, который может быть None
+
+        # Если у проекта нет навыков (None или пустой список), пропускаем его
+        if not project_skills:
+            logging.debug(f"Проект ID {project['id']} отфильтрован: нет списка навыков.")
+            continue
+
         project_skill_ids = {skill['id'] for skill in project_skills}
 
-        # Проверяем, есть ли хотя бы одно пересечение между навыками проекта и нашими
         if not REQUIRED_SKILLS_SET.intersection(project_skill_ids):
             logging.debug(f"Проект ID {project['id']} отфильтрован: нет совпадений по навыкам.")
             continue
-        # --- КОНЕЦ НОВОГО ФИЛЬТРА ---
+        # --- КОНЕЦ ИСПРАВЛЕННОГО ФИЛЬТРА ---
 
         title_raw = project.get('title')
         description_raw = project.get('description')
@@ -38,12 +51,10 @@ def filter_projects(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         description = description_raw.lower() if description_raw else ""
         project_text = title + ' ' + description
 
-        # 1. Проверка по черному списку (blacklist)
         if any(bl_word and bl_word in project_text for bl_word in BL_KEYWORDS):
             logging.debug(f"Проект ID {project['id']} отфильтрован по blacklist.")
             continue
 
-        # 2. Проверка бюджета
         budget = project.get('budget', {})
         max_budget = budget.get('maximum', 0)
 
