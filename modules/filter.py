@@ -1,33 +1,44 @@
-# modules/filter.py
+# modules/filter.py (финальная версия с "железным" фильтром по навыкам)
 
 import logging
 from typing import List, Dict, Any
 
-from config import BL_KEYWORDS, MIN_BUDGET, MAX_BUDGET
+# Добавляем SKILL_IDS в импорты
+from config import BL_KEYWORDS, MIN_BUDGET, MAX_BUDGET, SKILL_IDS
+
+# Превращаем список ID в множество для сверхбыстрой проверки
+# Это профессиональная оптимизация, которая ускоряет работу
+REQUIRED_SKILLS_SET = set(SKILL_IDS)
 
 
 def filter_projects(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Фильтрует список проектов по заданным критериям (blacklist, бюджет).
+    Фильтрует список проектов по blacklist, бюджету и ОБЯЗАТЕЛЬНОМУ
+    наличию хотя бы одного навыка из нашего списка.
     """
     if not projects:
         return []
 
     suitable_projects = []
     for project in projects:
-        # --- ИСПРАВЛЕННЫЙ БЛОК ---
-        # Более надежное получение текста, защищенное от None
+        # --- НАШ НОВЫЙ "ЖЕЛЕЗНЫЙ" ФИЛЬТР ---
+        project_skills = project.get('jobs', [])
+        # Извлекаем ID навыков из объекта проекта
+        project_skill_ids = {skill['id'] for skill in project_skills}
+
+        # Проверяем, есть ли хотя бы одно пересечение между навыками проекта и нашими
+        if not REQUIRED_SKILLS_SET.intersection(project_skill_ids):
+            logging.debug(f"Проект ID {project['id']} отфильтрован: нет совпадений по навыкам.")
+            continue
+        # --- КОНЕЦ НОВОГО ФИЛЬТРА ---
+
         title_raw = project.get('title')
         description_raw = project.get('description')
-
         title = title_raw.lower() if title_raw else ""
         description = description_raw.lower() if description_raw else ""
-        # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ---
-
         project_text = title + ' ' + description
 
         # 1. Проверка по черному списку (blacklist)
-        # Проверяем, что есть слова для проверки и что они не пустые
         if any(bl_word and bl_word in project_text for bl_word in BL_KEYWORDS):
             logging.debug(f"Проект ID {project['id']} отфильтрован по blacklist.")
             continue
