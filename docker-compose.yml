@@ -1,0 +1,10 @@
+# docker-compose.yml
+
+version: '3.8'
+
+services:
+  bid-assist:
+    build: .
+    env_file:
+      - .env
+    restart: unless-stopped
