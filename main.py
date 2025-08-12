@@ -16,9 +16,12 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 store = ProjectStore()
 
+
+# main.py
+
 async def polling_cycle(context: ContextTypes.DEFAULT_TYPE):
     """
-    Основная логика (финальная версия с 3-частной AI-сводкой).
+    Основная логика (финальная, самая умная версия).
     """
     logging.info("--- Начинаю новый цикл опроса проектов ---")
 
@@ -38,10 +41,19 @@ async def polling_cycle(context: ContextTypes.DEFAULT_TYPE):
         title = project.get('title', '')
         description = project.get('description', '')
 
-        # --- Получаем все 3 части от AI ---
-        difficulty_rating, summary, draft_bid = get_ai_summary(title, description)
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ: ПЕРЕДАЕМ БЮДЖЕТ ---
+        budget = project.get('budget', {})
+        min_budget = budget.get('minimum', 0)
+        max_budget = budget.get('maximum', 0)
 
-        # --- Передаем все 3 части в уведомление ---
+        difficulty_rating, summary, draft_bid = get_ai_summary(
+            title=title,
+            description=description,
+            budget_min=min_budget,
+            budget_max=max_budget
+        )
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
         await send_telegram_notification(project, draft_bid, difficulty_rating, summary)
         store.add_project(project_id)
 

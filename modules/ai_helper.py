@@ -15,42 +15,40 @@ else:
     logging.warning("OPENAI_API_KEY не найден. Модуль ai_helper будет работать в режиме деградации.")
 
 
-def get_ai_summary(title: str, description: str) -> Tuple[str, str, str]:
+def get_ai_summary(title: str, description: str, budget_min: float, budget_max: float) -> Tuple[str, str, str]:
     """
-    ОДНИМ запросом к LLM получает рейтинг, умное резюме и ГИПЕР-СПЕЦИФИЧНЫЙ отклик.
+    ОДНИМ запросом к LLM получает рейтинг, УМНОЕ резюме и ГИПЕР-СПЕЦИФИЧНЫЙ отклик,
+    учитывая скрытую сложность и бюджет.
     """
     if not client:
         return ("N/A", "AI is not configured.", "AI is not configured.")
 
     safe_description = description if description else ""
-    trimmed_description = safe_description[:2000]
+    trimmed_description = safe_description[:3000]  # Максимальный контекст
 
-    # --- УЛЬТИМАТИВНЫЙ ПРОМПТ С ПЕРСОНОЙ И СТИЛЕМ ---
+    # --- УЛЬТИМАТИВНЫЙ ПРОМПТ v6.0 ---
     prompt = (
-        f"You are my expert freelance assistant named 'BlueLion'. Your tone is confident, direct, and hyper-specific. Use simple English.\n"
-        f"Analyze the project below and provide three outputs separated by '---'.\n\n"
+        f"You are my expert freelance assistant. Your job is to analyze projects with extreme skepticism. Find hidden complexities and mismatches between budget and scope. Use simple, direct English.\n\n"
         f"**Project Details:**\n"
         f"- Title: {title}\n"
-        f"- Description: {trimmed_description}\n\n"
-        f"--- TASK 1: Difficulty Rating ---\n"
-        f"Rate the task difficulty for accomplish this task with the help of ai if I will follow all its instructions (EASY, MEDIUM, HARD).\n\n"
-        f"--- TASK 2: Conversational Summary ---\n"
-        f"Explain the project's goal to me in a friendly, conversational tone, as if talking to a colleague. Get straight to the point. "
-        f"**AVOID** robotic phrases like 'The project aims to' or 'The project involves'. Instead, say something like 'You will do...' or 'They want a...'. "
-        f"Mention if it's a new build, a fix, or a long-term role.\n\n"
+        f"- Description: {trimmed_description}\n"
+        f"- Budget: ${budget_min} - ${budget_max} USD\n\n"
+        f"--- TASK 1: Deep Difficulty Analysis ---\n"
+        f"Analyze the project's TRUE complexity. Look for red flags like multi-threading, CAPTCHA, anti-detection, proxy integration, session management, or resume logic. Also, consider if the budget is ridiculously low for the requested work. "
+        f"Rate the difficulty as EASY, MEDIUM, or HARD based on this deep analysis, not just keywords.\n\n"
+        f"--- TASK 2: Insightful Summary ---\n"
+        f"Explain the project's real goal in a conversational tone. AVOID robotic phrases. Mention if it's a simple script or a complex industrial-grade bot. Example: 'Okay, so this client needs a full-scale bot for mass-registering accounts on FIFA.com, including advanced anti-detection features.'\n\n"
         f"--- TASK 3: Hyper-Specific Bid Proposal ---\n"
-        f"Write a 2-3 sentence bid proposal from my persona. It MUST be confident, friendly and directly reference key technologies from the project description.\n"
-        f"**CRITICAL:** Do NOT just say 'I'm skilled in Python'. If the project is about 'PyQt', say 'I have strong experience with PyQt'. If it's about 'Laravel', say 'I have extensive experience in Laravel'. "
-        f"Here are examples of the **PERFECT** style:\n"
-        f"- 'Hi, I’m BlueLion, expert in AI/ML and data migration. I can convert XML to PySpark with schema checks, filtering, and metadata. I use smart AI to make the process fast and clean. Check my work: {PORTFOLIO_URL}.'\n"
-        f"- 'Hi, I’m BlueLion, expert in API integration. I can connect your custom API with DUDA and set real-time updates from Printify. I know DUDA and Printify well. See my work: {PORTFOLIO_URL}.'\n"
-        f"**Rules:** Start with 'Hi, I'm {USERNAME},...'. Mention the portfolio: {PORTFOLIO_URL}. Do NOT use formal closings.\n\n"
+        f"Write a 2-3 sentence bid proposal. It MUST be confident and directly reference key technologies (e.g., 'Selenium', 'IMAP', 'multi-threading'). "
+        f"**If the budget is insultingly low for a HARD project, the bid should politely address this.** "
+        f"Example for low-budget HARD project: 'Hi, I'm {USERNAME}. This is a complex project involving multi-threading and advanced automation. The listed budget of ${budget_max} would cover a basic proof-of-concept, but the full implementation would require a budget closer to $XXXX. See my work at {PORTFOLIO_URL}.'\n"
+        f"For normally priced projects, use this style: 'Hi, I’m {USERNAME}, an expert in API integration. I can connect your custom API with DUDA. See my work: {PORTFOLIO_URL}.'\n\n"
         f"--- YOUR RESPONSE FORMAT ---\n"
         f"RATING: [Your rating word]\n"
         f"---\n"
-        f"SUMMARY: [Your conversational, insightful summary]\n"
+        f"SUMMARY: [Your insightful, conversational summary]\n"
         f"---\n"
-        f"BID: [Your hyper-specific, confident proposal]"
+        f"BID: [Your hyper-specific, budget-aware proposal]"
     )
 
     try:
@@ -58,15 +56,15 @@ def get_ai_summary(title: str, description: str) -> Tuple[str, str, str]:
             model=LLM_MODEL,
             messages=[
                 {"role": "system",
-                 "content": "You are a confident, expert freelance assistant named BlueLion. You write hyper-specific, compelling bids and summaries."},
+                 "content": "You are a skeptical, highly experienced freelance developer who spots low budgets and hidden complexities. You follow output formats perfectly."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=400,  # Немного увеличим лимит для более качественных ответов
-            temperature=0.7
+            max_tokens=500,
+            temperature=0.5  # Снижаем температуру для более аналитических ответов
         )
         full_response = response.choices[0].message.content.strip()
 
-        # --- Парсинг 3-частного ответа (остается без изменений) ---
+        # ... (Парсинг остается без изменений) ...
         parts = full_response.split("---")
         if len(parts) != 3:
             logging.warning(f"AI did not return 3 parts. Response: {full_response}")
