@@ -4,10 +4,9 @@ import logging
 from telegram.ext import Application, ApplicationBuilder, ContextTypes
 
 from config import LOG_LEVEL, TELEGRAM_BOT_TOKEN, POLL_INTERVAL
-from modules.fetcher import get_new_projects
+from modules.fetcher import get_new_projects_list, get_project_details
 from modules.store import ProjectStore
 from modules.filter import filter_projects
-# Мы пока не делаем объединенный запрос, так что возвращаем старый импорт
 from modules.ai_helper import get_ai_summary
 from modules.notifier import send_telegram_notification
 
@@ -17,45 +16,56 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 store = ProjectStore()
 
 
-# main.py
-
 async def polling_cycle(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Основная логика (финальная, самая умная версия).
-    """
     logging.info("--- Начинаю новый цикл опроса проектов ---")
 
-    projects = get_new_projects()
-    if not projects: return
+    projects_list = get_new_projects_list()
+    if not projects_list: return
 
-    unprocessed_projects = [p for p in projects if not store.is_processed(p['id'])]
-    if not unprocessed_projects: return
+    unprocessed_projects = [p for p in projects_list if not store.is_processed(p['id'])]
+    if not unprocessed_projects:
+        logging.info("Все полученные проекты уже были обработаны ранее.")
+        return
 
-    suitable_projects = filter_projects(unprocessed_projects)
-    if not suitable_projects: return
+    logging.info(f"Получено {len(unprocessed_projects)} новых проектов. Запрашиваю детали...")
 
-    logging.info(f"Найдено {len(suitable_projects)} проектов для AI-обработки.")
+    final_suitable_projects = []
+    for project_preview in unprocessed_projects:
+        project_id = project_preview['id']
 
-    for project in suitable_projects:
-        project_id = project['id']
-        title = project.get('title', '')
-        description = project.get('description', '')
+        # Получаем полные детали
+        project_details = get_project_details(project_id)
+        if not project_details:
+            store.add_project(project_id)  # Запоминаем, чтобы не проверять снова
+            continue
 
-        # --- ИЗМЕНЕНИЕ ЗДЕСЬ: ПЕРЕДАЕМ БЮДЖЕТ ---
-        budget = project.get('budget', {})
+        # --- ГЛАВНЫЙ МОМЕНТ: ПРИМЕНЯЕМ СТРОГИЙ ФИЛЬТР ---
+        # Мы передаем проект в виде списка, так как фильтр ожидает список
+        if filter_projects([project_details]):
+            final_suitable_projects.append(project_details)
+        else:
+            logging.info(f"Проект ID {project_id} ('{project_details.get('title')}') отфильтрован финальной проверкой.")
+            store.add_project(project_id)  # Запоминаем отфильтрованные тоже
+
+    if not final_suitable_projects:
+        logging.info("После детальной проверки подходящих проектов не осталось.")
+        return
+
+    logging.info(f"Найдено {len(final_suitable_projects)} проектов для AI-анализа после финальной проверки.")
+
+    for final_project in final_suitable_projects:
+        title = final_project.get('title', '')
+        description = final_project.get('description', '')
+        budget = final_project.get('budget', {})
         min_budget = budget.get('minimum', 0)
         max_budget = budget.get('maximum', 0)
 
         difficulty_rating, summary, draft_bid = get_ai_summary(
-            title=title,
-            description=description,
-            budget_min=min_budget,
-            budget_max=max_budget
+            title=title, description=description, budget_min=min_budget, budget_max=max_budget
         )
-        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
-        await send_telegram_notification(project, draft_bid, difficulty_rating, summary)
-        store.add_project(project_id)
+        await send_telegram_notification(final_project, draft_bid, difficulty_rating, summary)
+        store.add_project(final_project['id'])
 
 
 def main():

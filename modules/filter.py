@@ -1,72 +1,62 @@
-# modules/filter.py (финальная версия с "железным" фильтром по навыкам)
+# modules/filter.py (СПЕЦИАЛЬНАЯ ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ - "ГРОМКИЙ ФИЛЬТР" v2)
 
 import logging
 from typing import List, Dict, Any
 
-# Добавляем SKILL_IDS в импорты
+# --- ИСПРАВЛЕННЫЙ ИМПОРТ ---
+# Мы импортируем SKILL_IDS, а не REQUIRED_SKILLS_SET
 from config import BL_KEYWORDS, MIN_BUDGET, MAX_BUDGET, SKILL_IDS
 
-# Превращаем список ID в множество для сверхбыстрой проверки
-# Это профессиональная оптимизация, которая ускоряет работу
-REQUIRED_SKILLS_SET = set(SKILL_IDS)
-
-# modules/filter.py (финальная версия с защитой от None в навыках)
-
-import logging
-from typing import List, Dict, Any
-
-from config import BL_KEYWORDS, MIN_BUDGET, MAX_BUDGET, SKILL_IDS
-
+# --- Создаем set ЗДЕСЬ, внутри файла ---
 REQUIRED_SKILLS_SET = set(SKILL_IDS)
 
 
 def filter_projects(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Фильтрует список проектов по blacklist, бюджету и ОБЯЗАТЕЛЬНОМУ
-    наличию хотя бы одного навыка из нашего списка.
-    """
     if not projects:
         return []
 
     suitable_projects = []
     for project in projects:
-        # --- ИСПРАВЛЕННЫЙ "ЖЕЛЕЗНЫЙ" ФИЛЬТР ---
-        project_skills = project.get('jobs')  # Получаем список навыков, который может быть None
+        project_id = project.get('id', 'N/A')
+        project_title = project.get('title', 'No Title')
 
-        # Если у проекта нет навыков (None или пустой список), пропускаем его
+        # --- БЛОК ДИАГНОСТИКИ НАВЫКОВ ---
+        project_skills = project.get('jobs')
         if not project_skills:
-            logging.debug(f"Проект ID {project['id']} отфильтрован: нет списка навыков.")
+            logging.debug(f"DIAGNOSTIC (ID: {project_id}): Проект отброшен, так как у него нет поля 'jobs'.")
             continue
 
         project_skill_ids = {skill['id'] for skill in project_skills}
+        intersection = REQUIRED_SKILLS_SET.intersection(project_skill_ids)
 
-        if not REQUIRED_SKILLS_SET.intersection(project_skill_ids):
-            logging.debug(f"Проект ID {project['id']} отфильтрован: нет совпадений по навыкам.")
+        if not intersection:
+            logging.debug(f"DIAGNOSTIC (ID: {project_id}): Проект отброшен, так как нет пересечения по навыкам.")
             continue
-        # --- КОНЕЦ ИСПРАВЛЕННОГО ФИЛЬТРА ---
 
-        title_raw = project.get('title')
-        description_raw = project.get('description')
-        title = title_raw.lower() if title_raw else ""
-        description = description_raw.lower() if description_raw else ""
+        # ЕСЛИ МЫ ДОШЛИ ДО СЮДА, ЗНАЧИТ, БОТ СЧИТАЕТ ПРОЕКТ РЕЛЕВАНТНЫМ.
+        # ТЕПЕРЬ МЫ ЗАСТАВИМ ЕГО ОБЪЯСНИТЬ, ПОЧЕМУ.
+        logging.info("=" * 50)
+        logging.info(f"!!! DIAGNOSTIC: ПРОЕКТ ПРОШЕЛ ФИЛЬТР ПО НАВЫКАМ !!!")
+        logging.info(f"    ID Проекта: {project_id}")
+        logging.info(f"    Название: {project_title}")
+        logging.info(f"    НАЙДЕННЫЕ СОВПАДЕНИЯ ПО ID НАВЫКОВ: {intersection}")
+        logging.info(f"    Все навыки проекта (для справки): {[skill.get('name') for skill in project_skills]}")
+        logging.info("=" * 50)
+        # --- КОНЕЦ БЛОКА ДИАГНОСТИКИ ---
+
+        # --- Остальные проверки (остаются без изменений) ---
+        title = (project.get('title') or '').lower()
+        description = (project.get('description') or '').lower()
         project_text = title + ' ' + description
 
         if any(bl_word and bl_word in project_text for bl_word in BL_KEYWORDS):
-            logging.debug(f"Проект ID {project['id']} отфильтрован по blacklist.")
             continue
 
         budget = project.get('budget', {})
         max_budget = budget.get('maximum', 0)
-
-        if not max_budget:
-            logging.debug(f"Проект ID {project['id']} отфильтрован, т.к. нет max_budget.")
-            continue
-
-        if not (MIN_BUDGET <= max_budget <= MAX_BUDGET):
-            logging.debug(f"Проект ID {project['id']} отфильтрован по бюджету (max: ${max_budget}).")
+        if not max_budget or not (MIN_BUDGET <= max_budget <= MAX_BUDGET):
             continue
 
         suitable_projects.append(project)
 
-    logging.info(f"Фильтрация завершена. Из {len(projects)} проектов осталось {len(suitable_projects)}.")
     return suitable_projects
