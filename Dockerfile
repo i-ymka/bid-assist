@@ -1,18 +1,20 @@
-# Dockerfile
+# Dockerfile for Bid-Assist
 
-# 1. Используем официальный, легкий образ Python
+# Use official Python slim image
 FROM python:3.11-slim
 
-# 2. Устанавливаем рабочую директорию внутри контейнера
+# Set working directory
 WORKDIR /app
 
-# 3. Копируем список зависимостей и устанавливаем их
-# Этот шаг кэшируется, чтобы не переустанавливать все каждый раз
+# Install dependencies first (for better caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. Копируем весь остальной код нашего приложения
+# Copy application code
 COPY . .
 
-# 5. Указываем команду, которая должна запускаться при старте контейнера
-CMD ["python", "main.py"]
+# Set Python path to include src directory
+ENV PYTHONPATH=/app
+
+# Run the application
+CMD ["python", "-m", "src.app"]

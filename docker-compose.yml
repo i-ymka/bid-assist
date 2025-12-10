@@ -1,10 +1,20 @@
 # docker-compose.yml
-
 version: '3.8'
 
 services:
   bid-assist:
     build: .
+    container_name: bid-assist
     env_file:
       - .env
+    volumes:
+      # Persist database between restarts
+      - ./data:/app/data
+    environment:
+      - DB_PATH=/app/data/processed_projects.db
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
