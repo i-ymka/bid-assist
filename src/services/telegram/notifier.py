@@ -1,23 +1,30 @@
-"""Telegram notification service."""
+"""Telegram notification service with Bid button."""
 
 import logging
 from typing import Optional
-from telegram import Bot
-from src.models import Project, AIAnalysis, BidResult
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from src.models import Project, AIAnalysis
 from src.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Cache for pending bids (project_id -> bid_data)
+# This stores bid info until user clicks the button
+_pending_bids = {}
+
+
+def get_pending_bid(project_id: int) -> Optional[dict]:
+    """Get pending bid data for a project."""
+    return _pending_bids.get(project_id)
+
+
+def remove_pending_bid(project_id: int):
+    """Remove pending bid data after it's been used."""
+    _pending_bids.pop(project_id, None)
+
 
 def escape_markdown_v2(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2.
-
-    Args:
-        text: Text to escape.
-
-    Returns:
-        Escaped text safe for MarkdownV2.
-    """
+    """Escape special characters for Telegram MarkdownV2."""
     escape_chars = r"_*[]()~`>#+-=|{}.!"
     safe_text = str(text) if text else ""
     for char in escape_chars:
@@ -26,15 +33,10 @@ def escape_markdown_v2(text: str) -> str:
 
 
 class Notifier:
-    """Service for sending Telegram notifications."""
+    """Service for sending Telegram notifications with Bid button."""
 
     def __init__(self, bot_token: str = None, chat_ids: list = None):
-        """Initialize the notifier.
-
-        Args:
-            bot_token: Telegram bot token. If None, uses settings.telegram_bot_token.
-            chat_ids: List of chat IDs to send to. If None, uses settings.telegram_chat_ids.
-        """
+        """Initialize the notifier."""
         self._token = bot_token or settings.telegram_bot_token
         self._chat_ids = chat_ids or settings.telegram_chat_ids
         self._bot = Bot(token=self._token)
@@ -43,26 +45,37 @@ class Notifier:
         self,
         project: Project,
         analysis: AIAnalysis,
-        bid_result: Optional[BidResult] = None,
     ) -> bool:
-        """Send a notification about a project.
+        """Send a notification about a project with a Bid button.
 
         Args:
             project: The project to notify about.
             analysis: AI analysis of the project.
-            bid_result: Optional result of automatic bid placement.
 
         Returns:
             True if notification sent successfully to at least one chat.
         """
-        text = self._format_project_message(project, analysis, bid_result)
-        return await self._send_to_all_chats(text)
+        # Store bid data for when user clicks button
+        bid_amount = analysis.suggested_amount or project.budget.maximum
+        bid_period = analysis.suggested_period or settings.default_bid_period
+
+        _pending_bids[project.id] = {
+            "project_id": project.id,
+            "amount": bid_amount,
+            "period": bid_period,
+            "description": analysis.suggested_bid_text,
+            "title": project.title,
+        }
+
+        text = self._format_project_message(project, analysis)
+        keyboard = self._create_bid_keyboard(project.id, bid_amount)
+
+        return await self._send_to_all_chats(text, keyboard)
 
     def _format_project_message(
         self,
         project: Project,
         analysis: AIAnalysis,
-        bid_result: Optional[BidResult] = None,
     ) -> str:
         """Format a project notification message."""
         title = escape_markdown_v2(project.title)
@@ -72,7 +85,6 @@ class Notifier:
         project_url = escape_markdown_v2(project.url)
         hashtag = f"\\#{analysis.difficulty.value}"
 
-        # Build message
         lines = [
             f"*{title}*\n",
             f"📝 *Summary:* {summary}\n",
@@ -84,55 +96,41 @@ class Notifier:
             suggested = escape_markdown_v2(f"${analysis.suggested_amount}")
             lines.append(f"💵 *Suggested Bid:* {suggested}\n")
 
+        if analysis.suggested_period:
+            lines.append(f"📅 *Suggested Period:* {analysis.suggested_period} days\n")
+
         lines.append(f"\n🔗 *Project link:*\n{project_url}\n")
         lines.append(f"\n👇 *Bid Proposal:*\n```\n{bid_text}\n```\n")
-
-        # Add auto-bid result if available
-        if bid_result:
-            if bid_result.success:
-                lines.append(f"\n✅ *Auto\\-bid placed successfully\\!*\n")
-            else:
-                error = escape_markdown_v2(bid_result.message)
-                lines.append(f"\n❌ *Auto\\-bid failed:* {error}\n")
-
         lines.append(f"\n{hashtag}")
 
         return "".join(lines)
 
+    def _create_bid_keyboard(
+        self,
+        project_id: int,
+        amount: float,
+    ) -> InlineKeyboardMarkup:
+        """Create inline keyboard with Bid button."""
+        button_text = f"💰 Place Bid (${amount:.0f})"
+        callback_data = f"bid:{project_id}"
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(button_text, callback_data=callback_data)]
+        ])
+        return keyboard
+
     async def send_status_message(self, status_text: str) -> bool:
-        """Send a status/info message.
-
-        Args:
-            status_text: The status message to send (plain text, will be escaped).
-
-        Returns:
-            True if sent successfully.
-        """
+        """Send a status/info message."""
         escaped = escape_markdown_v2(status_text)
         return await self._send_to_all_chats(escaped)
-
-    async def send_raw_message(self, text: str, parse_mode: str = "MarkdownV2") -> bool:
-        """Send a raw message (no escaping).
-
-        Args:
-            text: Pre-formatted message text.
-            parse_mode: Telegram parse mode.
-
-        Returns:
-            True if sent successfully.
-        """
-        return await self._send_to_all_chats(text, parse_mode=parse_mode)
 
     async def _send_to_all_chats(
         self,
         text: str,
+        keyboard: InlineKeyboardMarkup = None,
         parse_mode: str = "MarkdownV2",
     ) -> bool:
-        """Send a message to all configured chat IDs.
-
-        Returns:
-            True if sent to at least one chat successfully.
-        """
+        """Send a message to all configured chat IDs."""
         if not self._chat_ids:
             logger.warning("No chat IDs configured for notifications")
             return False
@@ -144,6 +142,7 @@ class Notifier:
                     chat_id=chat_id,
                     text=text,
                     parse_mode=parse_mode,
+                    reply_markup=keyboard,
                     disable_web_page_preview=True,
                 )
                 logger.debug(f"Notification sent to chat {chat_id}")

@@ -33,8 +33,7 @@ class Settings(BaseSettings):
     username: str = Field("Freelancer", alias="USERNAME")
     portfolio_url: str = Field("", alias="PORTFOLIO_URL")
 
-    # Auto-Bid Settings (NEW)
-    auto_bid_enabled: bool = Field(False, alias="AUTO_BID_ENABLED")
+    # Bid Settings
     default_bid_period: int = Field(3, alias="DEFAULT_BID_PERIOD")
     default_milestone_pct: int = Field(100, alias="DEFAULT_MILESTONE_PCT")
 

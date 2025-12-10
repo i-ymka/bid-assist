@@ -4,8 +4,7 @@ This is the main application entry point that orchestrates:
 - Periodic polling for new projects
 - Filtering based on skills, budget, and blacklist
 - AI-powered analysis and bid proposal generation
-- Optional automatic bid placement
-- Telegram notifications
+- Telegram notifications with "Place Bid" button
 """
 
 import logging
@@ -13,13 +12,12 @@ import sys
 from telegram.ext import ContextTypes
 
 from src.config import settings
-from src.services.freelancer import FreelancerClient, ProjectService, BiddingService
+from src.services.freelancer import FreelancerClient, ProjectService
 from src.services.ai import AIAnalyzer
 from src.services.telegram import TelegramBot, Notifier
 from src.services.telegram.handlers import get_runtime_state
 from src.services.storage import ProjectRepository
 from src.filters import FilterPipeline, BudgetFilter
-from src.models import Bid
 
 # Configure logging
 logging.basicConfig(
@@ -35,7 +33,6 @@ logger = logging.getLogger(__name__)
 # Initialize services (singleton pattern)
 _repository = None
 _project_service = None
-_bidding_service = None
 _ai_analyzer = None
 _notifier = None
 
@@ -53,14 +50,6 @@ def get_project_service() -> ProjectService:
         client = FreelancerClient()
         _project_service = ProjectService(client)
     return _project_service
-
-
-def get_bidding_service() -> BiddingService:
-    global _bidding_service
-    if _bidding_service is None:
-        client = FreelancerClient()
-        _bidding_service = BiddingService(client)
-    return _bidding_service
 
 
 def get_ai_analyzer() -> AIAnalyzer:
@@ -87,8 +76,7 @@ async def polling_cycle(context: ContextTypes.DEFAULT_TYPE):
     4. Gets full project details
     5. Applies filters (skills, budget, blacklist)
     6. Runs AI analysis on matching projects
-    7. Optionally places automatic bids
-    8. Sends Telegram notifications
+    7. Sends Telegram notification with "Place Bid" button
     """
     runtime_state = get_runtime_state()
 
@@ -101,7 +89,6 @@ async def polling_cycle(context: ContextTypes.DEFAULT_TYPE):
 
     repository = get_repository()
     project_service = get_project_service()
-    bidding_service = get_bidding_service()
     ai_analyzer = get_ai_analyzer()
     notifier = get_notifier()
 
@@ -151,37 +138,8 @@ async def polling_cycle(context: ContextTypes.DEFAULT_TYPE):
         # AI Analysis
         analysis = ai_analyzer.analyze_project(project)
 
-        # Auto-bid if enabled
-        bid_result = None
-        if runtime_state.get("auto_bid_enabled", False):
-            logger.info(f"Auto-bid enabled, placing bid on project {project_id}")
-
-            # Determine bid amount
-            bid_amount = analysis.suggested_amount or project.budget.maximum
-            bid_period = analysis.suggested_period or settings.default_bid_period
-
-            bid = Bid(
-                project_id=project_id,
-                amount=bid_amount,
-                period=bid_period,
-                milestone_percentage=settings.default_milestone_pct,
-                description=analysis.suggested_bid_text,
-            )
-
-            bid_result = bidding_service.place_bid(bid)
-
-            # Record bid in history
-            repository.add_bid_record(
-                project_id=project_id,
-                amount=bid_amount,
-                period=bid_period,
-                description=analysis.suggested_bid_text,
-                success=bid_result.success,
-                error_message=bid_result.message if not bid_result.success else None,
-            )
-
-        # Send notification
-        await notifier.send_project_notification(project, analysis, bid_result)
+        # Send notification with "Place Bid" button
+        await notifier.send_project_notification(project, analysis)
 
         # Mark as processed
         repository.add_processed_project(project_id)
@@ -208,7 +166,6 @@ def main():
     logger.info(f"Poll interval: {settings.poll_interval}s")
     logger.info(f"Budget range: ${settings.min_budget} - ${settings.max_budget}")
     logger.info(f"Skills: {len(settings.skill_ids)} configured")
-    logger.info(f"Auto-bid: {'ENABLED' if settings.auto_bid_enabled else 'DISABLED'}")
     logger.info(f"AI model: {settings.llm_model}")
 
     # Build and start bot
@@ -223,8 +180,8 @@ def main():
         first=5,  # Start first poll 5 seconds after bot starts
     )
 
-    logger.info(f"First poll will start in 5 seconds...")
-    logger.info("Bot is running. Use Telegram commands to control.")
+    logger.info("First poll will start in 5 seconds...")
+    logger.info("Bot is running. Click 'Place Bid' button to bid on projects.")
 
     # Start the bot
     application.run_polling()
