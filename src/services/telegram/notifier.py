@@ -85,21 +85,34 @@ class Notifier:
         project_url = escape_markdown_v2(project.url)
         hashtag = f"\\#{analysis.difficulty.value}"
 
+        # Client info
+        country = escape_markdown_v2(project.owner.country)
+        bid_count = project.bid_stats.bid_count
+        avg_bid = project.avg_bid_str
+
         lines = [
             f"*{title}*\n",
-            f"📝 *Summary:* {summary}\n",
-            f"💰 *Budget:* {budget_str}\n",
+            f"\n📝 *Summary:* {summary}\n",
+            f"\n📊 *Project Info:*\n",
+            f"  💰 Budget: {budget_str}\n",
+            f"  🏷️ Bids: {bid_count} \\(avg: {escape_markdown_v2(avg_bid)}\\)\n",
+            f"  🌍 Client: {country}\n",
         ]
 
-        # Add suggested bid amount if available
+        # Add NDA warning if required
+        if project.nda_required:
+            lines.append(f"  ⚠️ *NDA Required*\n")
+
+        # Add AI suggestions
+        lines.append(f"\n💡 *AI Suggestion:*\n")
         if analysis.suggested_amount:
-            suggested = escape_markdown_v2(f"${analysis.suggested_amount}")
-            lines.append(f"💵 *Suggested Bid:* {suggested}\n")
+            suggested = escape_markdown_v2(f"${analysis.suggested_amount:.0f}")
+            lines.append(f"  💵 Bid: {suggested}")
+            if analysis.suggested_period:
+                lines.append(f" for {analysis.suggested_period} days")
+            lines.append("\n")
 
-        if analysis.suggested_period:
-            lines.append(f"📅 *Suggested Period:* {analysis.suggested_period} days\n")
-
-        lines.append(f"\n🔗 *Project link:*\n{project_url}\n")
+        lines.append(f"\n🔗 *Link:* {project_url}\n")
         lines.append(f"\n👇 *Bid Proposal:*\n```\n{bid_text}\n```\n")
         lines.append(f"\n{hashtag}")
 

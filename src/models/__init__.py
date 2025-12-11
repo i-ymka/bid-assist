@@ -1,4 +1,4 @@
-from .project import Project, ProjectBudget, ProjectOwner
+from .project import Project, ProjectBudget, ProjectOwner, BidStats
 from .bid import Bid, BidResult, AIAnalysis
 
-__all__ = ["Project", "ProjectBudget", "ProjectOwner", "Bid", "BidResult", "AIAnalysis"]
+__all__ = ["Project", "ProjectBudget", "ProjectOwner", "BidStats", "Bid", "BidResult", "AIAnalysis"]

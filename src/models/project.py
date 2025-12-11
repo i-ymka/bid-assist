@@ -16,6 +16,7 @@ class ProjectOwner(BaseModel):
 
     id: int
     username: str = "N/A"
+    country: str = "Unknown"
 
 
 class ProjectSkill(BaseModel):
@@ -32,6 +33,13 @@ class ProjectCurrency(BaseModel):
     name: str = "US Dollar"
 
 
+class BidStats(BaseModel):
+    """Bid statistics for a project."""
+
+    bid_count: int = 0
+    bid_avg: Optional[float] = None
+
+
 class Project(BaseModel):
     """Freelancer project model."""
 
@@ -44,6 +52,12 @@ class Project(BaseModel):
     jobs: List[ProjectSkill] = Field(default_factory=list)
     status: str = ""
     type: str = ""
+
+    # New fields
+    bid_stats: BidStats = Field(default_factory=BidStats)
+    hireme: bool = False  # True = preferred freelancer only
+    nda_required: bool = False
+    nda_details: Optional[str] = None
 
     @property
     def skill_ids(self) -> set:
@@ -58,19 +72,69 @@ class Project(BaseModel):
     @property
     def budget_str(self) -> str:
         """Get formatted budget string."""
-        return f"{self.budget.minimum} - {self.budget.maximum} {self.currency.code}"
+        return f"${self.budget.minimum:.0f} - ${self.budget.maximum:.0f} {self.currency.code}"
+
+    @property
+    def avg_bid_str(self) -> str:
+        """Get formatted average bid string."""
+        if self.bid_stats.bid_avg:
+            return f"${self.bid_stats.bid_avg:.0f}"
+        return "N/A"
+
+    @property
+    def is_preferred_only(self) -> bool:
+        """Check if project is for preferred freelancers only."""
+        return self.hireme
 
     @classmethod
-    def from_api_response(cls, data: dict) -> "Project":
-        """Create Project from Freelancer API response."""
+    def from_api_response(cls, data: dict, users: dict = None) -> "Project":
+        """Create Project from Freelancer API response.
+
+        Args:
+            data: Project data from API
+            users: Optional dict of users keyed by user ID (for owner details)
+        """
+        # Get owner info
+        owner_id = data.get("owner_id", 0)
+        owner_data = {"id": owner_id, "username": "N/A", "country": "Unknown"}
+
+        if data.get("owner"):
+            owner_data["id"] = data["owner"].get("id", owner_id)
+            owner_data["username"] = data["owner"].get("username", "N/A")
+
+        # Get country from users dict if available
+        if users and str(owner_id) in users:
+            user = users[str(owner_id)]
+            owner_data["username"] = user.get("username", owner_data["username"])
+            location = user.get("location", {})
+            if location:
+                country = location.get("country", {})
+                if country:
+                    owner_data["country"] = country.get("name", "Unknown") or "Unknown"
+
+        # Get bid stats
+        bid_stats_data = data.get("bid_stats", {})
+        bid_stats = BidStats(
+            bid_count=bid_stats_data.get("bid_count", 0) or 0,
+            bid_avg=bid_stats_data.get("bid_avg"),
+        )
+
+        # Check NDA
+        nda_details = data.get("nda_details")
+        nda_required = nda_details is not None and nda_details != {}
+
         return cls(
             id=data.get("id", 0),
             title=data.get("title", ""),
             description=data.get("description", ""),
             budget=ProjectBudget(**data.get("budget", {})),
             currency=ProjectCurrency(**data.get("currency", {})),
-            owner=ProjectOwner(**data.get("owner", {})) if data.get("owner") else ProjectOwner(id=0),
+            owner=ProjectOwner(**owner_data),
             jobs=[ProjectSkill(**job) for job in data.get("jobs", [])],
             status=data.get("status", ""),
             type=data.get("type", ""),
+            bid_stats=bid_stats,
+            hireme=data.get("hireme", False) or False,
+            nda_required=nda_required,
+            nda_details=str(nda_details) if nda_details else None,
         )

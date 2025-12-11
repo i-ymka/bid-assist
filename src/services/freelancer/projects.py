@@ -35,7 +35,7 @@ class ProjectService:
             limit: Maximum number of projects to fetch.
 
         Returns:
-            List of Project objects (lightweight, without full description)
+            List of Project objects with bid stats and owner info.
         """
         skill_ids = skill_ids if skill_ids is not None else settings.skill_ids
         min_budget = min_budget if min_budget is not None else settings.min_budget
@@ -45,18 +45,30 @@ class ProjectService:
             "project_types[]": "fixed",
             "min_budget": min_budget,
             "limit": limit,
+            # Request additional details
+            "user_details": "true",
+            "user_country_details": "true",
+            "bid_details": "true",
         }
 
-        logger.info(f"Fetching active projects with params: {params}")
+        logger.info(f"Fetching active projects...")
 
         try:
             response = self._client.get(PROJECTS_ACTIVE_ENDPOINT, params=params)
-            projects_data = response.get("result", {}).get("projects", [])
+            result = response.get("result", {})
+            projects_data = result.get("projects", [])
+            users = result.get("users", {})
 
-            projects = [
-                Project.from_api_response(p) for p in projects_data
-            ]
-            logger.info(f"Fetched {len(projects)} active projects")
+            projects = []
+            for p in projects_data:
+                # Skip preferred freelancer only projects
+                if p.get("hireme", False):
+                    logger.debug(f"Skipping project {p.get('id')} - preferred freelancer only")
+                    continue
+
+                projects.append(Project.from_api_response(p, users))
+
+            logger.info(f"Fetched {len(projects)} active projects (filtered preferred-only)")
             return projects
 
         except Exception as e:
@@ -76,19 +88,33 @@ class ProjectService:
         params = {
             "full_description": "true",
             "job_details": "true",
+            "user_details": "true",
+            "user_country_details": "true",
+            "bid_details": "true",
         }
 
         logger.debug(f"Fetching details for project {project_id}")
 
         try:
             response = self._client.get(endpoint, params=params)
-            project_data = response.get("result")
+            result = response.get("result")
 
-            if not project_data:
+            if not result:
                 logger.warning(f"No data returned for project {project_id}")
                 return None
 
-            return Project.from_api_response(project_data)
+            # For single project, result is the project itself
+            # Users might be in a separate key or embedded
+            users = response.get("users", {})
+
+            project = Project.from_api_response(result, users)
+
+            # Skip if preferred freelancer only
+            if project.is_preferred_only:
+                logger.info(f"Skipping project {project_id} - preferred freelancer only")
+                return None
+
+            return project
 
         except Exception as e:
             logger.error(f"Failed to fetch project {project_id} details: {e}")
