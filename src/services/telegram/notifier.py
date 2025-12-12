@@ -23,6 +23,47 @@ def remove_pending_bid(project_id: int):
     _pending_bids.pop(project_id, None)
 
 
+def update_pending_bid(project_id: int, amount: float = None, description: str = None):
+    """Update pending bid data (amount or description).
+
+    Returns:
+        Updated bid data dict or None if not found.
+    """
+    if project_id not in _pending_bids:
+        return None
+
+    if amount is not None:
+        _pending_bids[project_id]["amount"] = amount
+    if description is not None:
+        _pending_bids[project_id]["description"] = description
+
+    return _pending_bids[project_id]
+
+
+def create_updated_keyboard(project_id: int, amount: float) -> InlineKeyboardMarkup:
+    """Create keyboard with updated amount for edited bids."""
+    # Get currency from pending bid
+    bid_data = _pending_bids.get(project_id, {})
+    currency = bid_data.get("currency", "USD")
+
+    edit_amount_btn = InlineKeyboardButton(
+        "✏️ Edit Amount",
+        callback_data=f"edit_amount:{project_id}"
+    )
+    edit_text_btn = InlineKeyboardButton(
+        "✏️ Edit Proposal",
+        callback_data=f"edit_text:{project_id}"
+    )
+    bid_btn = InlineKeyboardButton(
+        f"💰 Place Bid ({amount:.0f} {currency})",
+        callback_data=f"bid:{project_id}"
+    )
+    return InlineKeyboardMarkup([
+        [edit_amount_btn, edit_text_btn],
+        [bid_btn]
+    ])
+
+
 def escape_markdown_v2(text: str) -> str:
     """Escape special characters for Telegram MarkdownV2."""
     escape_chars = r"_*[]()~`>#+-=|{}.!"
@@ -65,10 +106,11 @@ class Notifier:
             "period": bid_period,
             "description": analysis.suggested_bid_text,
             "title": project.title,
+            "currency": project.currency.code,
         }
 
         text = self._format_project_message(project, analysis)
-        keyboard = self._create_bid_keyboard(project.id, bid_amount)
+        keyboard = self._create_bid_keyboard(project.id, bid_amount, project.currency.code)
 
         return await self._send_to_all_chats(text, keyboard)
 
@@ -106,7 +148,8 @@ class Notifier:
         # Add AI suggestions
         lines.append(f"\n💡 *AI Suggestion:*\n")
         if analysis.suggested_amount:
-            suggested = escape_markdown_v2(f"${analysis.suggested_amount:.0f}")
+            currency_code = project.currency.code
+            suggested = escape_markdown_v2(f"{analysis.suggested_amount:.0f} {currency_code}")
             lines.append(f"  💵 Bid: {suggested}")
             if analysis.suggested_period:
                 lines.append(f" for {analysis.suggested_period} days")
@@ -122,13 +165,28 @@ class Notifier:
         self,
         project_id: int,
         amount: float,
+        currency: str = "USD",
     ) -> InlineKeyboardMarkup:
-        """Create inline keyboard with Bid button."""
-        button_text = f"💰 Place Bid (${amount:.0f})"
-        callback_data = f"bid:{project_id}"
+        """Create inline keyboard with Bid and Edit buttons."""
+        # Row 1: Edit buttons
+        edit_amount_btn = InlineKeyboardButton(
+            "✏️ Edit Amount",
+            callback_data=f"edit_amount:{project_id}"
+        )
+        edit_text_btn = InlineKeyboardButton(
+            "✏️ Edit Proposal",
+            callback_data=f"edit_text:{project_id}"
+        )
+
+        # Row 2: Place Bid button
+        bid_btn = InlineKeyboardButton(
+            f"💰 Place Bid ({amount:.0f} {currency})",
+            callback_data=f"bid:{project_id}"
+        )
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(button_text, callback_data=callback_data)]
+            [edit_amount_btn, edit_text_btn],
+            [bid_btn]
         ])
         return keyboard
 

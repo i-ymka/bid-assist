@@ -6,7 +6,10 @@ from telegram.ext import (
     ContextTypes,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
+    ConversationHandler,
     Application,
+    filters,
 )
 from src.config import settings
 from src.services.storage import ProjectRepository
@@ -15,10 +18,15 @@ from src.services.telegram.notifier import (
     escape_markdown_v2,
     get_pending_bid,
     remove_pending_bid,
+    update_pending_bid,
+    create_updated_keyboard,
 )
 from src.models import Bid
 
 logger = logging.getLogger(__name__)
+
+# Conversation states
+WAITING_AMOUNT, WAITING_TEXT = range(2)
 
 # Runtime state (shared across handlers)
 _runtime_state = {
@@ -170,6 +178,161 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, parse_mode="MarkdownV2")
 
 
+async def handle_edit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Edit Amount' button click."""
+    query = update.callback_query
+    await query.answer()
+
+    # Parse project_id from callback data
+    try:
+        project_id = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        await query.message.reply_text("❌ Invalid data")
+        return ConversationHandler.END
+
+    # Check if bid still exists
+    bid_data = get_pending_bid(project_id)
+    if not bid_data:
+        await query.message.reply_text("❌ Bid data expired.")
+        return ConversationHandler.END
+
+    # Store project_id in context for later use
+    context.user_data["editing_project_id"] = project_id
+    context.user_data["original_message"] = query.message
+
+    currency = bid_data.get("currency", "USD")
+    await query.message.reply_text(
+        f"💵 Current amount: {bid_data['amount']:.0f} {currency}\n\n"
+        f"Send new bid amount (number only):\n"
+        f"Or send /cancel to cancel"
+    )
+    return WAITING_AMOUNT
+
+
+async def receive_new_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive new bid amount from user."""
+    project_id = context.user_data.get("editing_project_id")
+    original_message = context.user_data.get("original_message")
+
+    if not project_id:
+        await update.message.reply_text("❌ No edit in progress")
+        return ConversationHandler.END
+
+    try:
+        new_amount = float(update.message.text.strip().replace("$", "").replace(",", ""))
+        if new_amount <= 0:
+            raise ValueError("Amount must be positive")
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid amount. Please send a number.\n"
+            "Example: 150 or 150.50\n\n"
+            "Or /cancel to cancel"
+        )
+        return WAITING_AMOUNT
+
+    # Update the pending bid
+    bid_data = update_pending_bid(project_id, amount=new_amount)
+    if not bid_data:
+        await update.message.reply_text("❌ Bid data expired.")
+        return ConversationHandler.END
+
+    currency = bid_data.get("currency", "USD")
+
+    # Update the original message keyboard with new amount
+    try:
+        new_keyboard = create_updated_keyboard(project_id, new_amount)
+        await original_message.edit_reply_markup(reply_markup=new_keyboard)
+    except Exception as e:
+        logger.error(f"Failed to update keyboard: {e}")
+
+    await update.message.reply_text(
+        f"✅ Amount updated to {new_amount:.0f} {currency}\n\n"
+        f"Go back to the project message and click 'Place Bid' when ready!"
+    )
+
+    # Clear context
+    context.user_data.pop("editing_project_id", None)
+    context.user_data.pop("original_message", None)
+
+    return ConversationHandler.END
+
+
+async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Edit Proposal' button click."""
+    query = update.callback_query
+    await query.answer()
+
+    # Parse project_id from callback data
+    try:
+        project_id = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        await query.message.reply_text("❌ Invalid data")
+        return ConversationHandler.END
+
+    # Check if bid still exists
+    bid_data = get_pending_bid(project_id)
+    if not bid_data:
+        await query.message.reply_text("❌ Bid data expired.")
+        return ConversationHandler.END
+
+    # Store project_id in context for later use
+    context.user_data["editing_project_id"] = project_id
+
+    current_text = bid_data.get("description", "")[:200]  # Show preview
+
+    await query.message.reply_text(
+        f"📝 Current proposal preview:\n```\n{current_text}...\n```\n\n"
+        f"Send your new bid proposal text:\n"
+        f"Or send /cancel to cancel",
+        parse_mode="Markdown"
+    )
+    return WAITING_TEXT
+
+
+async def receive_new_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive new bid text from user."""
+    project_id = context.user_data.get("editing_project_id")
+
+    if not project_id:
+        await update.message.reply_text("❌ No edit in progress")
+        return ConversationHandler.END
+
+    new_text = update.message.text.strip()
+    if len(new_text) < 50:
+        await update.message.reply_text(
+            "❌ Proposal too short (min 50 characters).\n"
+            "Please write a more detailed proposal.\n\n"
+            "Or /cancel to cancel"
+        )
+        return WAITING_TEXT
+
+    # Update the pending bid
+    bid_data = update_pending_bid(project_id, description=new_text)
+    if not bid_data:
+        await update.message.reply_text("❌ Bid data expired.")
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        f"✅ Proposal updated!\n\n"
+        f"Preview:\n```\n{new_text[:200]}...\n```\n\n"
+        f"Go back to the project message and click 'Place Bid' when ready!",
+        parse_mode="Markdown"
+    )
+
+    # Clear context
+    context.user_data.pop("editing_project_id", None)
+
+    return ConversationHandler.END
+
+
+async def cancel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel the edit operation."""
+    context.user_data.pop("editing_project_id", None)
+    context.user_data.pop("original_message", None)
+    await update.message.reply_text("❌ Edit cancelled.")
+    return ConversationHandler.END
+
+
 async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle 'Place Bid' button click."""
     query = update.callback_query
@@ -211,6 +374,9 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     result = bidding_service.place_bid(bid)
 
+    # Get currency before removing from pending
+    currency = bid_data.get("currency", "USD")
+
     # Record in database
     repo.add_bid_record(
         project_id=project_id,
@@ -229,10 +395,10 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text(
             f"✅ Bid placed successfully!\n\n"
             f"Project: {bid_data['title']}\n"
-            f"Amount: ${bid_data['amount']}\n"
+            f"Amount: {bid_data['amount']:.0f} {currency}\n"
             f"Period: {bid_data['period']} days"
         )
-        logger.info(f"Bid placed on project {project_id}: ${bid_data['amount']}")
+        logger.info(f"Bid placed on project {project_id}: {bid_data['amount']} {currency}")
     else:
         await query.edit_message_text(
             f"❌ Bid failed\n\n"
@@ -250,6 +416,37 @@ def setup_handlers(application: Application):
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
     application.add_handler(CommandHandler("stats", cmd_stats))
+
+    # Conversation handler for editing amount
+    edit_amount_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(handle_edit_amount, pattern="^edit_amount:")
+        ],
+        states={
+            WAITING_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_new_amount),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_edit)],
+        per_message=False,
+    )
+
+    # Conversation handler for editing proposal text
+    edit_text_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(handle_edit_text, pattern="^edit_text:")
+        ],
+        states={
+            WAITING_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_new_text),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_edit)],
+        per_message=False,
+    )
+
+    application.add_handler(edit_amount_handler)
+    application.add_handler(edit_text_handler)
 
     # Callback handler for Bid button
     application.add_handler(CallbackQueryHandler(handle_bid_callback, pattern="^bid:"))

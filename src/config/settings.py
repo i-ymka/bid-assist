@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # Database
     db_path: str = Field("processed_projects.db", alias="DB_PATH")
 
+    # AI Prompt file path
+    ai_prompt_file: str = Field("prompt.txt", alias="AI_PROMPT_FILE")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

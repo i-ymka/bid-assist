@@ -72,13 +72,13 @@ class Project(BaseModel):
     @property
     def budget_str(self) -> str:
         """Get formatted budget string."""
-        return f"${self.budget.minimum:.0f} - ${self.budget.maximum:.0f} {self.currency.code}"
+        return f"{self.budget.minimum:.0f} - {self.budget.maximum:.0f} {self.currency.code}"
 
     @property
     def avg_bid_str(self) -> str:
         """Get formatted average bid string."""
         if self.bid_stats.bid_avg:
-            return f"${self.bid_stats.bid_avg:.0f}"
+            return f"{self.bid_stats.bid_avg:.0f} {self.currency.code}"
         return "N/A"
 
     @property
@@ -125,16 +125,16 @@ class Project(BaseModel):
 
         return cls(
             id=data.get("id", 0),
-            title=data.get("title", ""),
-            description=data.get("description", ""),
-            budget=ProjectBudget(**data.get("budget", {})),
-            currency=ProjectCurrency(**data.get("currency", {})),
+            title=data.get("title") or "",
+            description=data.get("description") or "",
+            budget=ProjectBudget(**(data.get("budget") or {})),
+            currency=ProjectCurrency(**(data.get("currency") or {})),
             owner=ProjectOwner(**owner_data),
-            jobs=[ProjectSkill(**job) for job in data.get("jobs", [])],
-            status=data.get("status", ""),
-            type=data.get("type", ""),
+            jobs=[ProjectSkill(**job) for job in (data.get("jobs") or [])],
+            status=data.get("status") or "",
+            type=data.get("type") or "",
             bid_stats=bid_stats,
-            hireme=data.get("hireme", False) or False,
+            hireme=data.get("hireme") or False,
             nda_required=nda_required,
             nda_details=str(nda_details) if nda_details else None,
         )

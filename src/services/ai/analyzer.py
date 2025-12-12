@@ -2,6 +2,7 @@
 
 import logging
 import re
+from pathlib import Path
 from typing import Optional
 import openai
 from src.models import Project, AIAnalysis, Difficulty
@@ -10,6 +11,25 @@ from src.core.exceptions import AIAnalysisError
 
 logger = logging.getLogger(__name__)
 
+# Default prompt template (used if prompt file not found)
+DEFAULT_PROMPT = """You are my expert freelance assistant. Analyze this project.
+
+**Project:** {title}
+**Description:** {description}
+**Budget:** {budget_min} - {budget_max} {currency}
+
+Decide is it good project for finish it with ai help or no, should we bit or no. Write a summary, and create a bid proposal, if you decided to bid. If no - give me explanation. Always use basix english.
+
+VERDICT: [word]
+---
+SUMMARY: [summary]
+---
+BID: [proposal mentioning {username}]
+---
+AMOUNT: [number]
+---
+PERIOD: [days]"""
+
 
 class AIAnalyzer:
     """Analyzes projects using OpenAI to provide difficulty ratings, summaries, and bid proposals."""
@@ -17,7 +37,9 @@ class AIAnalyzer:
     def __init__(self):
         """Initialize the AI analyzer."""
         self._client: Optional[openai.OpenAI] = None
+        self._prompt_template: str = DEFAULT_PROMPT
         self._initialize_client()
+        self._load_prompt_template()
 
     def _initialize_client(self):
         """Initialize the OpenAI client."""
@@ -31,6 +53,21 @@ class AIAnalyzer:
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI client: {e}")
             self._client = None
+
+    def _load_prompt_template(self):
+        """Load prompt template from file."""
+        prompt_path = Path(settings.ai_prompt_file)
+
+        if prompt_path.exists():
+            try:
+                self._prompt_template = prompt_path.read_text(encoding="utf-8")
+                logger.info(f"Loaded prompt template from {prompt_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load prompt file: {e}. Using default.")
+                self._prompt_template = DEFAULT_PROMPT
+        else:
+            logger.info(f"Prompt file {prompt_path} not found. Using default prompt.")
+            self._prompt_template = DEFAULT_PROMPT
 
     @property
     def is_available(self) -> bool:
@@ -85,44 +122,19 @@ class AIAnalyzer:
             )
 
     def _build_prompt(self, project: Project) -> str:
-        """Build the analysis prompt for a project."""
+        """Build the analysis prompt for a project using template."""
         description = (project.description or "")[:3000]
 
-        return f"""You are my expert freelance assistant. Your job is to analyze projects with extreme skepticism. Find hidden complexities and mismatches between budget and scope. Use simple, direct English.
-
-**Project Details:**
-- Title: {project.title}
-- Description: {description}
-- Budget: ${project.budget.minimum} - ${project.budget.maximum} {project.currency.code}
-
---- TASK 1: Deep Difficulty Analysis ---
-Analyze the project's TRUE complexity. Look for red flags like multi-threading, CAPTCHA, anti-detection, proxy integration, session management, or resume logic. Also, consider if the budget is ridiculously low for the requested work.
-Rate the difficulty as EASY, MEDIUM, or HARD based on this deep analysis, not just keywords.
-
---- TASK 2: Insightful Summary ---
-Explain the project's real goal in a conversational tone. AVOID robotic phrases. Mention if it's a simple script or a complex industrial-grade bot. Example: 'Okay, so this client needs a full-scale bot for mass-registering accounts on FIFA.com, including advanced anti-detection features.'
-
---- TASK 3: Hyper-Specific Bid Proposal ---
-Write a 2-3 sentence bid proposal. It MUST be confident and directly reference key technologies (e.g., 'Selenium', 'IMAP', 'multi-threading').
-**If the budget is insultingly low for a HARD project, the bid should politely address this.**
-Example for low-budget HARD project: 'Hi, I'm {settings.username}. This is a complex project involving multi-threading and advanced automation. The listed budget of ${project.budget.maximum} would cover a basic proof-of-concept, but the full implementation would require a budget closer to $XXXX. See my work at {settings.portfolio_url}.'
-For normally priced projects, use this style: 'Hi, I'm {settings.username}, an expert in API integration. I can connect your custom API with DUDA. See my work: {settings.portfolio_url}.'
-
---- TASK 4: Bid Amount Suggestion ---
-Based on the project complexity and scope, suggest a realistic bid amount in USD.
-If the project budget seems fair, suggest bidding near the maximum budget.
-If the budget is too low for the scope, suggest a realistic amount that reflects the actual work required.
-
---- YOUR RESPONSE FORMAT ---
-RATING: [Your rating word]
----
-SUMMARY: [Your insightful, conversational summary]
----
-BID: [Your hyper-specific, budget-aware proposal]
----
-AMOUNT: [Suggested bid amount as a number, e.g., 150]
----
-PERIOD: [Suggested delivery period in days, e.g., 5]"""
+        # Fill in template placeholders
+        return self._prompt_template.format(
+            title=project.title,
+            description=description,
+            budget_min=f"{project.budget.minimum:.0f}",
+            budget_max=f"{project.budget.maximum:.0f}",
+            currency=project.currency.code,
+            username=settings.username,
+            portfolio_url=settings.portfolio_url,
+        )
 
     def _parse_response(self, response: str) -> AIAnalysis:
         """Parse the AI response into an AIAnalysis object."""
@@ -136,10 +148,10 @@ PERIOD: [Suggested delivery period in days, e.g., 5]"""
                 suggested_bid_text=response,
             )
 
-        # Extract rating
-        rating_text = parts[0].replace("RATING:", "").strip().upper()
+        # Extract verdication
+        verdict_text = parts[0].replace("VERDICT:", "").strip().upper()
         try:
-            difficulty = Difficulty(rating_text)
+            difficulty = Difficulty(verdict_text)
         except ValueError:
             difficulty = Difficulty.UNKNOWN
 
