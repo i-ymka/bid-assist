@@ -1,7 +1,7 @@
 """Telegram command and callback handlers."""
 
 import logging
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ContextTypes,
     CommandHandler,
@@ -53,22 +53,42 @@ def get_runtime_state() -> dict:
     return _runtime_state
 
 
+def create_control_keyboard() -> InlineKeyboardMarkup:
+    """Create control panel keyboard based on current state."""
+    is_paused = _runtime_state.get("paused", False)
+
+    if is_paused:
+        toggle_btn = InlineKeyboardButton("▶️ Start", callback_data="control:start")
+    else:
+        toggle_btn = InlineKeyboardButton("⏹️ Stop", callback_data="control:stop")
+
+    status_btn = InlineKeyboardButton("📊 Status", callback_data="control:status")
+    stats_btn = InlineKeyboardButton("📈 Stats", callback_data="control:stats")
+
+    return InlineKeyboardMarkup([
+        [toggle_btn],
+        [status_btn, stats_btn],
+    ])
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command."""
+    """Handle /start command - show control panel."""
+    is_paused = _runtime_state.get("paused", False)
+    status_emoji = "⏸️ PAUSED" if is_paused else "▶️ RUNNING"
+
+    text = (
+        f"🤖 *Bid\\-Assist Control Panel*\n\n"
+        f"Status: {status_emoji}\n\n"
+        f"I monitor Freelancer and send you projects with AI analysis\\.\n"
+        f"Click *Place Bid* button to bid on projects you like\\."
+    )
+
+    keyboard = create_control_keyboard()
+
     await update.message.reply_text(
-        "👋 Welcome to Bid-Assist!\n\n"
-        "I monitor Freelancer for new projects matching your skills.\n\n"
-        "When I find a good project, I'll send you:\n"
-        "• AI-powered summary\n"
-        "• Suggested bid amount\n"
-        "• Ready-to-use bid proposal\n"
-        "• A 'Place Bid' button\n\n"
-        "Commands:\n"
-        "/status - Show current status\n"
-        "/setbudget <min> <max> - Set budget range\n"
-        "/pause - Pause monitoring\n"
-        "/resume - Resume monitoring\n"
-        "/stats - Show bid statistics"
+        text,
+        parse_mode="MarkdownV2",
+        reply_markup=keyboard,
     )
 
 
@@ -333,6 +353,75 @@ async def cancel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def handle_control_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle control panel button clicks."""
+    query = update.callback_query
+    await query.answer()
+
+    action = query.data.split(":")[1] if ":" in query.data else ""
+
+    if action == "start":
+        _runtime_state["paused"] = False
+        status_text = "▶️ Monitoring STARTED"
+        logger.info("Monitoring started via control panel")
+
+    elif action == "stop":
+        _runtime_state["paused"] = True
+        status_text = "⏹️ Monitoring STOPPED"
+        logger.info("Monitoring stopped via control panel")
+
+    elif action == "status":
+        repo = ProjectRepository()
+        processed_count = repo.get_processed_count()
+        is_paused = _runtime_state.get("paused", False)
+        status_emoji = "⏸️ PAUSED" if is_paused else "▶️ RUNNING"
+
+        status_text = (
+            f"📊 Status: {status_emoji}\n"
+            f"💰 Budget: ${_runtime_state['min_budget']} - ${_runtime_state['max_budget']}\n"
+            f"📁 Processed: {processed_count} projects"
+        )
+
+    elif action == "stats":
+        repo = ProjectRepository()
+        stats = repo.get_bid_stats()
+        success_rate = 0
+        if stats["total_bids"] > 0:
+            success_rate = (stats["successful_bids"] / stats["total_bids"]) * 100
+
+        status_text = (
+            f"📈 Bid Statistics\n\n"
+            f"Total bids: {stats['total_bids']}\n"
+            f"Successful: {stats['successful_bids']}\n"
+            f"Success rate: {success_rate:.1f}%\n"
+            f"Avg amount: ${stats['avg_amount']}"
+        )
+    else:
+        status_text = "Unknown action"
+
+    # Update the message with new keyboard
+    is_paused = _runtime_state.get("paused", False)
+    main_status = "⏸️ PAUSED" if is_paused else "▶️ RUNNING"
+
+    text = (
+        f"🤖 *Bid\\-Assist Control Panel*\n\n"
+        f"Status: {main_status}\n\n"
+        f"{escape_markdown_v2(status_text)}"
+    )
+
+    keyboard = create_control_keyboard()
+
+    try:
+        await query.edit_message_text(
+            text,
+            parse_mode="MarkdownV2",
+            reply_markup=keyboard,
+        )
+    except Exception:
+        # Message unchanged, just update keyboard
+        await query.edit_message_reply_markup(reply_markup=keyboard)
+
+
 async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle 'Place Bid' button click."""
     query = update.callback_query
@@ -447,6 +536,9 @@ def setup_handlers(application: Application):
 
     application.add_handler(edit_amount_handler)
     application.add_handler(edit_text_handler)
+
+    # Callback handler for control panel buttons
+    application.add_handler(CallbackQueryHandler(handle_control_callback, pattern="^control:"))
 
     # Callback handler for Bid button
     application.add_handler(CallbackQueryHandler(handle_bid_callback, pattern="^bid:"))
