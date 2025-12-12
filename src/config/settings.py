@@ -11,13 +11,13 @@ class Settings(BaseSettings):
     # API Keys & Tokens
     freelancer_oauth_token: str = Field(..., alias="FREELANCER_OAUTH_TOKEN")
     telegram_bot_token: str = Field(..., alias="TELEGRAM_BOT_TOKEN")
-    openai_api_key: str = Field(..., alias="OPENAI_API_KEY")
+    gemini_api_key: str = Field("", alias="GEMINI_API_KEY")
 
     # Telegram Settings
     telegram_chat_ids_raw: str = Field("", alias="TELEGRAM_CHAT_IDS")
 
     # LLM Settings
-    llm_model: str = Field("gpt-4o-mini", alias="LLM_MODEL")
+    llm_model: str = Field("gemini-2.0-flash", alias="LLM_MODEL")
 
     # Filtering Settings
     blacklist_raw: str = Field("", alias="BL")

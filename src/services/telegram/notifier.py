@@ -125,7 +125,7 @@ class Notifier:
         bid_text = escape_markdown_v2(analysis.suggested_bid_text)
         budget_str = escape_markdown_v2(project.budget_str)
         project_url = escape_markdown_v2(project.url)
-        hashtag = f"\\#{analysis.difficulty.value}"
+        hashtag = f"\\#{analysis.verdict.value}"
 
         # Client info
         country = escape_markdown_v2(project.owner.country)

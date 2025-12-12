@@ -5,39 +5,36 @@ from pydantic import BaseModel, Field
 from enum import Enum
 
 
-class Difficulty(str, Enum):
-    """Project difficulty levels."""
+class Verdict(str, Enum):
+    """AI verdict for whether to bid on a project."""
 
-    EASY = "EASY"
-    MEDIUM = "MEDIUM"
-    HARD = "HARD"
+    BID = "BID"
+    SKIP = "SKIP"
     UNKNOWN = "UNKNOWN"
+
+
+# Alias for backwards compatibility
+Difficulty = Verdict
 
 
 class AIAnalysis(BaseModel):
     """AI analysis result for a project."""
 
-    difficulty: Difficulty = Difficulty.UNKNOWN
+    verdict: Verdict = Verdict.UNKNOWN
     summary: str = ""
     suggested_bid_text: str = ""
     suggested_amount: Optional[float] = None
     suggested_period: Optional[int] = None
 
-    @classmethod
-    def from_ai_response(
-        cls, rating: str, summary: str, bid_text: str
-    ) -> "AIAnalysis":
-        """Create AIAnalysis from AI response strings."""
-        try:
-            difficulty = Difficulty(rating.upper().strip())
-        except ValueError:
-            difficulty = Difficulty.UNKNOWN
+    @property
+    def should_bid(self) -> bool:
+        """Check if we should bid on this project."""
+        return self.verdict == Verdict.BID
 
-        return cls(
-            difficulty=difficulty,
-            summary=summary,
-            suggested_bid_text=bid_text,
-        )
+    @property
+    def difficulty(self) -> Verdict:
+        """Alias for backwards compatibility."""
+        return self.verdict
 
 
 class Bid(BaseModel):

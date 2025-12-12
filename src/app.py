@@ -138,8 +138,12 @@ async def polling_cycle(context: ContextTypes.DEFAULT_TYPE):
         # AI Analysis
         analysis = ai_analyzer.analyze_project(project)
 
-        # Send notification with "Place Bid" button
-        await notifier.send_project_notification(project, analysis)
+        # Only send notification if AI recommends bidding
+        if analysis.should_bid:
+            await notifier.send_project_notification(project, analysis)
+            logger.info(f"Project {project_id}: AI recommends BID, notification sent")
+        else:
+            logger.info(f"Project {project_id}: AI recommends SKIP - {analysis.summary[:100]}")
 
         # Mark as processed
         repository.add_processed_project(project_id)
