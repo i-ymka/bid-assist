@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 from typing import Optional
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from src.models import Project, AIAnalysis
@@ -10,6 +11,36 @@ from src.services.storage import ProjectRepository
 from src.services.freelancer.bidding import strip_markdown
 
 logger = logging.getLogger(__name__)
+
+# Custom emoji IDs (Telegram Premium)
+_CE = {
+    "summary": "5188156318443141940",       # 📝
+    "stats": "5334544901428229844",          # 📊
+    "budget": "5240290577102152084",         # 💰
+    "bids": "5237931961451815445",           # 🏷️
+    "country": "5348474966427841129",        # 🌍
+    "check": "5364035134725043602",          # ✅
+    "link": "5974492756494519709",           # 🔗
+    "proposal": "5192825506239616944",       # 👇
+}
+
+_HEADER_EMOJI_IDS = [
+    "5188440323155588640", "5188361166908322403", "5188164934147535346",
+    "5188587713548284884", "5224649148023710232", "5449681528546152415",
+    "5370757703436082874", "5211042120399347150", "5240076365608264313",
+]
+
+
+def ce(name: str) -> str:
+    """Custom emoji in MarkdownV2 format."""
+    eid = _CE.get(name)
+    return f"![emoji](tg://emoji?id={eid})" if eid else ""
+
+
+def random_header_emoji() -> str:
+    """Random header custom emoji in MarkdownV2 format."""
+    eid = random.choice(_HEADER_EMOJI_IDS)
+    return f"![emoji](tg://emoji?id={eid})"
 
 
 def get_pending_bid(project_id: int) -> Optional[dict]:
@@ -46,17 +77,14 @@ def create_updated_keyboard(project_id: int, amount: float, currency: str = None
     edit_amount_btn = InlineKeyboardButton(
         "✏️ Edit Amount",
         callback_data=f"edit_amount:{project_id}",
-        api_kwargs={"style": 5},  # blue
     )
     edit_text_btn = InlineKeyboardButton(
         "✏️ Edit Proposal",
         callback_data=f"edit_text:{project_id}",
-        api_kwargs={"style": 5},  # blue
     )
     bid_btn = InlineKeyboardButton(
         f"💰 Place Bid ({amount:.0f} {currency})",
         callback_data=f"bid:{project_id}",
-        api_kwargs={"style": 3},  # green
     )
     return InlineKeyboardMarkup([
         [edit_amount_btn, edit_text_btn],
@@ -94,36 +122,36 @@ def rebuild_bid_message(bid_data: dict) -> str:
     suggested_escaped = escape_markdown_v2(f"{amount:.0f} {currency}")
 
     lines = [
-        f"✅ *BID* \\| {title}\n\n",
+        f"{ce('check')} *BID* \\| {title}\n\n",
     ]
 
     # Budget info
     if budget_min and budget_max:
         budget_str = escape_markdown_v2(f"${budget_min:.0f} - ${budget_max:.0f} {currency}")
-        lines.append(f"💰 *Budget:* {budget_str}\n")
+        lines.append(f"{ce('budget')} *Budget:* {budget_str}\n")
     elif budget_max:
         budget_str = escape_markdown_v2(f"up to ${budget_max:.0f} {currency}")
-        lines.append(f"💰 *Budget:* {budget_str}\n")
+        lines.append(f"{ce('budget')} *Budget:* {budget_str}\n")
 
     # Country and bids info
     if client_country:
-        lines.append(f"🌍 *Country:* {escape_markdown_v2(client_country)}\n")
-    lines.append(f"📊 *Bids:* {bid_count}")
+        lines.append(f"{ce('country')} *Country:* {escape_markdown_v2(client_country)}\n")
+    lines.append(f"{ce('stats')} *Bids:* {bid_count}")
     if avg_bid:
         lines.append(f" \\(avg: ${avg_bid:.0f}\\)")
     lines.append("\n")
 
     # Summary
     if summary:
-        lines.append(f"\n📝 *Summary:* {escape_markdown_v2(summary)}\n")
+        lines.append(f"\n{ce('summary')} *Summary:* {escape_markdown_v2(summary)}\n")
 
     # AI suggestion (compact)
     lines.append(f"\n💡 *AI:* {suggested_escaped} · {period} days\n")
 
     if url:
-        lines.append(f"\n🔗 *Link:* {url}\n")
+        lines.append(f"\n{ce('link')} *Link:* {url}\n")
 
-    lines.append(f"\n👇 *Bid Proposal:*\n```\n{bid_text}\n```")
+    lines.append(f"\n{ce('proposal')} *Bid Proposal:*\n```\n{bid_text}\n```")
 
     # Add #BID tag (project still needs bidding)
     lines.append(f"\n\n\\#BID")
@@ -211,10 +239,10 @@ class Notifier:
 
         lines = [
             f"*{title}*\n",
-            f"\n📝 *Summary:* {summary}\n",
-            f"\n💰 Budget: {budget_str}\n",
-            f"🏷️ Bids: {bid_count} \\(avg: {escape_markdown_v2(avg_bid)}\\)\n",
-            f"🌍 Client: {country}\n",
+            f"\n{ce('summary')} *Summary:* {summary}\n",
+            f"\n{ce('budget')} Budget: {budget_str}\n",
+            f"{ce('bids')} Bids: {bid_count} \\(avg: {escape_markdown_v2(avg_bid)}\\)\n",
+            f"{ce('country')} Client: {country}\n",
         ]
 
         # Add NDA warning if required
@@ -228,8 +256,8 @@ class Notifier:
             period_str = f" · {analysis.suggested_period} days" if analysis.suggested_period else ""
             lines.append(f"\n💡 *AI:* {suggested}{period_str}\n")
 
-        lines.append(f"\n🔗 *Link:* {project_url}\n")
-        lines.append(f"\n👇 *Bid Proposal:*\n```\n{bid_text}\n```\n")
+        lines.append(f"\n{ce('link')} *Link:* {project_url}\n")
+        lines.append(f"\n{ce('proposal')} *Bid Proposal:*\n```\n{bid_text}\n```\n")
         lines.append(f"\n{hashtag}")
 
         return "".join(lines)
@@ -244,18 +272,15 @@ class Notifier:
         edit_amount_btn = InlineKeyboardButton(
             "✏️ Edit Amount",
             callback_data=f"edit_amount:{project_id}",
-            api_kwargs={"style": 5},  # blue
-        )
+            )
         edit_text_btn = InlineKeyboardButton(
             "✏️ Edit Proposal",
             callback_data=f"edit_text:{project_id}",
-            api_kwargs={"style": 5},  # blue
-        )
+            )
         bid_btn = InlineKeyboardButton(
             f"💰 Place Bid ({amount:.0f} {currency})",
             callback_data=f"bid:{project_id}",
-            api_kwargs={"style": 3},  # green
-        )
+            )
         return InlineKeyboardMarkup([
             [edit_amount_btn, edit_text_btn],
             [bid_btn]
@@ -390,14 +415,14 @@ class Notifier:
 
         lines = [
             f"*{title_escaped}*\n",
-            f"\n📝 *Summary:* {summary_escaped}\n",
-            f"\n📊 *Project Info:*\n",
-            f"  💰 Budget: {budget_escaped}\n",
-            f"  🏷️ Bids: {bid_count} \\(avg: {avg_bid_escaped}\\)\n",
-            f"  🌍 Client: {country_escaped}\n",
+            f"\n{ce('summary')} *Summary:* {summary_escaped}\n",
+            f"\n{ce('stats')} *Project Info:*\n",
+            f"  {ce('budget')} Budget: {budget_escaped}\n",
+            f"  {ce('bids')} Bids: {bid_count} \\(avg: {avg_bid_escaped}\\)\n",
+            f"  {ce('country')} Client: {country_escaped}\n",
             f"\n💡 *AI:* {suggested_escaped} · {suggested_period} days\n",
-            f"\n🔗 *Link:* {url_escaped}\n",
-            f"\n👇 *Bid Proposal:*\n```\n{bid_text_escaped}\n```\n",
+            f"\n{ce('link')} *Link:* {url_escaped}\n",
+            f"\n{ce('proposal')} *Bid Proposal:*\n```\n{bid_text_escaped}\n```\n",
             f"\n\\#BID",
         ]
 
@@ -500,11 +525,11 @@ class Notifier:
         lines = [
             f"*{title_escaped}*\n",
             f"\n❌ *SKIPPED*\n",
-            f"\n📝 *Reason:* {summary_escaped}\n",
-            f"\n📊 *Project Info:*\n",
-            f"  💰 Budget: {budget_escaped}\n",
-            f"  🌍 Client: {country_escaped}\n",
-            f"\n🔗 *Link:* {url_escaped}\n",
+            f"\n{ce('summary')} *Reason:* {summary_escaped}\n",
+            f"\n{ce('stats')} *Project Info:*\n",
+            f"  {ce('budget')} Budget: {budget_escaped}\n",
+            f"  {ce('country')} Client: {country_escaped}\n",
+            f"\n{ce('link')} *Link:* {url_escaped}\n",
             f"\n\\#SKIP",
         ]
 
@@ -514,7 +539,6 @@ class Notifier:
         ask_bid_btn = InlineKeyboardButton(
             "🔄 Ask for Bid Anyway",
             callback_data=f"ask_bid:{project_id}",
-            api_kwargs={"style": 2},  # purple
         )
         keyboard = InlineKeyboardMarkup([[ask_bid_btn]])
 
@@ -599,20 +623,20 @@ class Notifier:
 
         lines = [
             f"*{title_escaped}*\n",
-            f"\n📝 *Summary:* {summary_escaped}\n",
-            f"\n📊 *Project Info:*\n",
-            f"  💰 Budget: {budget_escaped}\n",
-            f"  🏷️ Bids: {bid_count} \\(avg: {avg_bid_escaped}\\)\n",
-            f"  🌍 Client: {country_escaped}\n",
+            f"\n{ce('summary')} *Summary:* {summary_escaped}\n",
+            f"\n{ce('stats')} *Project Info:*\n",
+            f"  {ce('budget')} Budget: {budget_escaped}\n",
+            f"  {ce('bids')} Bids: {bid_count} \\(avg: {avg_bid_escaped}\\)\n",
+            f"  {ce('country')} Client: {country_escaped}\n",
             f"\n💡 *AI:* {amount_escaped} · {period} days\n",
-            f"\n🔗 *Link:* {url_escaped}\n",
-            f"\n👇 *Bid Proposal:*\n```\n{bid_text_escaped}\n```\n",
+            f"\n{ce('link')} *Link:* {url_escaped}\n",
+            f"\n{ce('proposal')} *Bid Proposal:*\n```\n{bid_text_escaped}\n```\n",
         ]
 
         # Bid result section (same format as manual bid)
         lines.append(f"\n{'─' * 30}\n")
-        lines.append(f"🤖 *AUTO\\-BID PLACED\\!*\n")
-        lines.append(f"💰 {amount_escaped} · {period} days\n")
+        lines.append(f"{random_header_emoji()} *AUTO\\-BID PLACED\\!*\n")
+        lines.append(f"{ce('check')} {amount_escaped} · {period} days\n")
         if remaining_bids is not None:
             lines.append(f"🎟️ Remaining: {remaining_bids}\n")
         lines.append(f"\n\\#AUTOBID")
@@ -624,7 +648,7 @@ class Notifier:
         if url:
             check_url = f"{url}/proposals"
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Check my bid", url=check_url, api_kwargs={"style": 4})],  # cyan
+                [InlineKeyboardButton("🔗 Check my bid", url=check_url)],  # cyan
             ])
 
         return await self.send_to_user(chat_id, text, keyboard)
@@ -646,7 +670,7 @@ class Notifier:
         lines = [
             f"❌ *AUTO\\-BID FAILED*\n",
             f"\n*{title_escaped}*\n",
-            f"\n💵 Amount: ${amount_escaped}\n",
+            f"\n{ce('budget')} Amount: ${amount_escaped}\n",
             f"⚠️ Error: {error_escaped}\n",
         ]
 
@@ -655,7 +679,7 @@ class Notifier:
         keyboard = None
         if url:
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 View Project", url=url, api_kwargs={"style": 0})],  # red
+                [InlineKeyboardButton("🔗 View Project", url=url)],  # red
             ])
 
         return await self.send_to_user(chat_id, text, keyboard)
@@ -727,10 +751,12 @@ async def schedule_bid_update(
             parts.append(f"{remaining} remaining")
 
         if parts:
-            text = "📊 " + " · ".join(parts)
+            parts_text = escape_markdown_v2(" · ".join(parts))
+            text = f"{ce('stats')} {parts_text}"
             await bot.send_message(
                 chat_id=chat_id,
                 text=text,
+                parse_mode="MarkdownV2",
                 reply_to_message_id=message_id,
                 disable_notification=True,
             )

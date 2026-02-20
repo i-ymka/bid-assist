@@ -18,7 +18,7 @@ from src.config import settings
 from src.services.storage import ProjectRepository
 from src.services.freelancer import FreelancerClient, BiddingService, ProjectService
 from src.services.freelancer.bidding import strip_markdown
-from src.services.telegram.notifier import create_updated_keyboard, rebuild_bid_message
+from src.services.telegram.notifier import create_updated_keyboard, rebuild_bid_message, ce, random_header_emoji
 from src.models import Bid
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 *Status & Control*
 /status — Status & Start/Stop bot
-/stats — Statistics
 /bidstats — Bid history
 
 *Settings*
@@ -273,25 +272,6 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _runtime_state["paused"] = False
     await update.message.reply_text("▶️ Monitoring RESUMED!")
     logger.info("Monitoring resumed via Telegram command")
-
-
-async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /stats command."""
-    repo = ProjectRepository()
-    bot_start = repo.get_bot_start_time()
-    session_stats = repo.get_bid_stats(since=bot_start)
-    all_stats = repo.get_bid_stats()
-    session_seen = repo.get_processed_count(since=bot_start)
-    all_seen = repo.get_processed_count()
-
-    message = (
-        f"📈 *Bid Statistics* _\\(session / all time\\)_\n\n"
-        f"Projects seen: {session_seen} \\({all_seen}\\)\n"
-        f"Bids placed: {session_stats['bids_placed']} \\({all_stats['bids_placed']}\\)\n"
-        f"Avg amount: ${session_stats['avg_amount']} \\(${all_stats['avg_amount']}\\)"
-    )
-
-    await update.message.reply_text(message, parse_mode="MarkdownV2")
 
 
 async def send_in_chunks(update: Update, text: str, max_length: int = 4096):
@@ -732,7 +712,6 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
     auto_bid_status = "🟢 On" if repo.is_auto_bid() else "🔴 Off"
     state = get_runtime_state()
 
-    auto_bid_style = 3 if repo.is_auto_bid() else 0  # green when on, red when off
     keyboard = [
         [
             InlineKeyboardButton(f"💰 Budget: ${state['min_budget']}-${state['max_budget']}", callback_data="settings:budget"),
@@ -747,7 +726,7 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"Skip Preferred-Only: {skip_preferred_status}", callback_data="settings:skip_preferred"),
         ],
         [
-            InlineKeyboardButton(f"Auto-Bid: {auto_bid_status}", callback_data="settings:auto_bid", api_kwargs={"style": auto_bid_style}),
+            InlineKeyboardButton(f"Auto-Bid: {auto_bid_status}", callback_data="settings:auto_bid"),
         ],
         [
             InlineKeyboardButton("🔧 Skills & Keywords", callback_data="settings:skills_keywords"),
@@ -889,9 +868,9 @@ def get_control_keyboard() -> InlineKeyboardMarkup:
     is_paused = repo.is_paused()
 
     if is_paused:
-        button = InlineKeyboardButton("▶️ Start", callback_data="control:start", api_kwargs={"style": 3})  # green
+        button = InlineKeyboardButton("▶️ Start", callback_data="control:start")
     else:
-        button = InlineKeyboardButton("⏹️ Stop", callback_data="control:stop", api_kwargs={"style": 0})  # red
+        button = InlineKeyboardButton("⏹️ Stop", callback_data="control:stop")
 
     return InlineKeyboardMarkup([[button]])
 
@@ -1222,25 +1201,22 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
 
     reply_text = (
         f"💡 *AI Generated Bid:*\n"
-        f"  💵 Amount: {result.amount:.0f} {currency_escaped} for {result.period} days\n\n"
-        f"👇 *Bid Proposal:*\n```\n{bid_text_escaped}\n```"
+        f"  {ce('budget')} Amount: {result.amount:.0f} {currency_escaped} for {result.period} days\n\n"
+        f"{ce('proposal')} *Bid Proposal:*\n```\n{bid_text_escaped}\n```"
     )
 
     # Create bid buttons
     edit_amount_btn = InlineKeyboardButton(
         "✏️ Edit Amount",
         callback_data=f"edit_amount:{project_id}",
-        api_kwargs={"style": 5},  # blue
     )
     edit_text_btn = InlineKeyboardButton(
         "✏️ Edit Proposal",
         callback_data=f"edit_text:{project_id}",
-        api_kwargs={"style": 5},  # blue
     )
     bid_btn = InlineKeyboardButton(
         f"💰 Place Bid ({result.amount:.0f} {currency})",
         callback_data=f"bid:{project_id}",
-        api_kwargs={"style": 3},  # green
     )
     keyboard = InlineKeyboardMarkup([
         [edit_amount_btn, edit_text_btn],
@@ -1316,7 +1292,6 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             check_btn = InlineKeyboardButton(
                 "🔗 Check my bid",
                 url=check_bid_url,
-                api_kwargs={"style": 4},  # cyan
             )
             keyboard = InlineKeyboardMarkup([[check_btn]])
 
@@ -1376,7 +1351,7 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard = None
         if check_bid_url:
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Check my bid", url=check_bid_url, api_kwargs={"style": 4})]  # cyan
+                [InlineKeyboardButton("🔗 Check my bid", url=check_bid_url)]  # cyan
             ])
 
         # Get original message in MarkdownV2 format and append bid result
@@ -1388,8 +1363,8 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             bid_result = (
                 f"\n\n{'─' * 30}\n"
-                f"✅ *BID PLACED\\!*\n"
-                f"💰 {bid_data['amount']:.0f} {escape_markdown_v2(currency)} · {bid_data['period']} days\n"
+                f"{random_header_emoji()} *BID PLACED\\!*\n"
+                f"{ce('check')} {bid_data['amount']:.0f} {escape_markdown_v2(currency)} · {bid_data['period']} days\n"
                 f"{escape_markdown_v2(remaining_text)}"
             )
 
@@ -1397,6 +1372,7 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 text=original_md + bid_result,
                 parse_mode="MarkdownV2",
                 reply_markup=keyboard,
+                disable_web_page_preview=True,
             )
         except Exception as e:
             logger.error(f"Failed to update message with bid result: {e}")
@@ -1404,13 +1380,14 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 original_text = query.message.text or ""
                 bid_result = (
                     f"\n\n{'─' * 30}\n"
-                    f"✅ BID PLACED!\n"
-                    f"💰 {bid_data['amount']:.0f} {currency} · {bid_data['period']} days\n"
+                    f"BID PLACED!\n"
+                    f"{bid_data['amount']:.0f} {currency} · {bid_data['period']} days\n"
                     f"{remaining_text}"
                 )
                 await query.edit_message_text(
                     text=original_text + bid_result,
                     reply_markup=keyboard,
+                    disable_web_page_preview=True,
                 )
             except Exception as e2:
                 logger.error(f"Fallback also failed: {e2}")
@@ -1444,18 +1421,15 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         edit_amount_btn = InlineKeyboardButton(
             "✏️ Edit Amount",
             callback_data=f"edit_amount:{project_id}",
-            api_kwargs={"style": 5},  # blue
-        )
+            )
         edit_text_btn = InlineKeyboardButton(
             "✏️ Edit Proposal",
             callback_data=f"edit_text:{project_id}",
-            api_kwargs={"style": 5},  # blue
-        )
+            )
         retry_btn = InlineKeyboardButton(
             f"🔄 Retry Bid",
             callback_data=f"bid:{project_id}",
-            api_kwargs={"style": 1},  # orange
-        )
+            )
         keyboard = InlineKeyboardMarkup([
             [edit_amount_btn, edit_text_btn],
             [retry_btn]
@@ -1550,7 +1524,6 @@ def setup_handlers(application: Application):
     application.add_handler(CommandHandler("control", cmd_control))
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
-    application.add_handler(CommandHandler("stats", cmd_stats))
     application.add_handler(CommandHandler("bidstats", cmd_bid_stats))
     application.add_handler(CommandHandler("settings", cmd_settings))
 

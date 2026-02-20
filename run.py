@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext.Updater").setLevel(logging.CRITICAL)
 
 # Global flag for graceful shutdown
 shutdown_event = asyncio.Event()
@@ -595,7 +596,6 @@ async def main():
         BotCommand("status", "Status & Control"),
         BotCommand("settings", "Bot settings"),
         BotCommand("myprofile", "Your profile"),
-        BotCommand("stats", "Statistics"),
         BotCommand("bidstats", "Bid history"),
         BotCommand("help", "Help"),
     ])

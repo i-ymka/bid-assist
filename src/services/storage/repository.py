@@ -94,6 +94,12 @@ class ProjectRepository:
                     )
                 """)
 
+                # Add processed_at column if not exists (migration for old DBs)
+                try:
+                    self._conn.execute("ALTER TABLE processed_projects ADD COLUMN processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                except sqlite3.OperationalError:
+                    pass
+
                 # Add url, bid_count, updated_at, summary columns if they don't exist (migration)
                 try:
                     self._conn.execute("ALTER TABLE pending_bids ADD COLUMN url TEXT")
