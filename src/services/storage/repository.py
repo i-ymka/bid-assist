@@ -152,6 +152,10 @@ class ProjectRepository:
                     INSERT OR IGNORE INTO runtime_settings (key, value)
                     VALUES ('poll_interval', '300')
                 """)
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO runtime_settings (key, value)
+                    VALUES ('total_projects_seen', '0')
+                """)
 
                 # User settings table (multi-user support)
                 self._conn.execute("""
@@ -203,6 +207,13 @@ class ProjectRepository:
                     "INSERT OR IGNORE INTO processed_projects (project_id) VALUES (?)",
                     (project_id,),
                 )
+                # Increment persistent counter (survives RESET_ON_START)
+                self._conn.execute("""
+                    UPDATE runtime_settings
+                    SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE key = 'total_projects_seen'
+                """)
             return True
         except sqlite3.Error as e:
             logger.error(f"Failed to add project {project_id}: {e}")
@@ -1197,6 +1208,19 @@ class ProjectRepository:
         except sqlite3.Error as e:
             logger.error(f"Failed to set bot start time: {e}")
             return False
+
+    def get_total_projects_seen(self) -> int:
+        """Get persistent total projects seen (survives RESET_ON_START)."""
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'total_projects_seen'"
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+        except (sqlite3.Error, ValueError) as e:
+            logger.error(f"Failed to get total_projects_seen: {e}")
+            return 0
 
     def get_bot_start_time(self) -> Optional[str]:
         """Get when the bot started."""

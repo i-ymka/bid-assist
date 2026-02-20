@@ -99,7 +99,7 @@ def _build_status_message(repo: ProjectRepository) -> str:
     session_stats = repo.get_bid_stats(since=bot_start)
     all_stats = repo.get_bid_stats()
     session_seen = repo.get_processed_count(since=bot_start)
-    all_seen = repo.get_processed_count()
+    all_seen = repo.get_total_projects_seen()
 
     monitoring_status = "⏸️ PAUSED" if repo.is_paused() else "▶️ RUNNING"
 
@@ -1209,14 +1209,17 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
     edit_amount_btn = InlineKeyboardButton(
         "✏️ Edit Amount",
         callback_data=f"edit_amount:{project_id}",
+        api_kwargs={"style": "primary"},
     )
     edit_text_btn = InlineKeyboardButton(
         "✏️ Edit Proposal",
         callback_data=f"edit_text:{project_id}",
+        api_kwargs={"style": "primary"},
     )
     bid_btn = InlineKeyboardButton(
         f"💰 Place Bid ({result.amount:.0f} {currency})",
         callback_data=f"bid:{project_id}",
+        api_kwargs={"style": "success"},
     )
     keyboard = InlineKeyboardMarkup([
         [edit_amount_btn, edit_text_btn],
@@ -1292,6 +1295,7 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             check_btn = InlineKeyboardButton(
                 "🔗 Check my bid",
                 url=check_bid_url,
+                api_kwargs={"style": "primary"},
             )
             keyboard = InlineKeyboardMarkup([[check_btn]])
 
@@ -1351,7 +1355,7 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard = None
         if check_bid_url:
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Check my bid", url=check_bid_url)]  # cyan
+                [InlineKeyboardButton("🔗 Check my bid", url=check_bid_url, api_kwargs={"style": "primary"})]
             ])
 
         # Get original message in MarkdownV2 format and append bid result
@@ -1421,14 +1425,17 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         edit_amount_btn = InlineKeyboardButton(
             "✏️ Edit Amount",
             callback_data=f"edit_amount:{project_id}",
+            api_kwargs={"style": "primary"},
             )
         edit_text_btn = InlineKeyboardButton(
             "✏️ Edit Proposal",
             callback_data=f"edit_text:{project_id}",
+            api_kwargs={"style": "primary"},
             )
         retry_btn = InlineKeyboardButton(
             f"🔄 Retry Bid",
             callback_data=f"bid:{project_id}",
+            api_kwargs={"style": "danger"},
             )
         keyboard = InlineKeyboardMarkup([
             [edit_amount_btn, edit_text_btn],

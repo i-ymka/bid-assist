@@ -77,14 +77,17 @@ def create_updated_keyboard(project_id: int, amount: float, currency: str = None
     edit_amount_btn = InlineKeyboardButton(
         "✏️ Edit Amount",
         callback_data=f"edit_amount:{project_id}",
+        api_kwargs={"style": "primary"},
     )
     edit_text_btn = InlineKeyboardButton(
         "✏️ Edit Proposal",
         callback_data=f"edit_text:{project_id}",
+        api_kwargs={"style": "primary"},
     )
     bid_btn = InlineKeyboardButton(
         f"💰 Place Bid ({amount:.0f} {currency})",
         callback_data=f"bid:{project_id}",
+        api_kwargs={"style": "success"},
     )
     return InlineKeyboardMarkup([
         [edit_amount_btn, edit_text_btn],
@@ -272,14 +275,17 @@ class Notifier:
         edit_amount_btn = InlineKeyboardButton(
             "✏️ Edit Amount",
             callback_data=f"edit_amount:{project_id}",
+            api_kwargs={"style": "primary"},
             )
         edit_text_btn = InlineKeyboardButton(
             "✏️ Edit Proposal",
             callback_data=f"edit_text:{project_id}",
+            api_kwargs={"style": "primary"},
             )
         bid_btn = InlineKeyboardButton(
             f"💰 Place Bid ({amount:.0f} {currency})",
             callback_data=f"bid:{project_id}",
+            api_kwargs={"style": "success"},
             )
         return InlineKeyboardMarkup([
             [edit_amount_btn, edit_text_btn],
@@ -539,6 +545,7 @@ class Notifier:
         ask_bid_btn = InlineKeyboardButton(
             "🔄 Ask for Bid Anyway",
             callback_data=f"ask_bid:{project_id}",
+            api_kwargs={"style": "danger"},
         )
         keyboard = InlineKeyboardMarkup([[ask_bid_btn]])
 
@@ -648,7 +655,7 @@ class Notifier:
         if url:
             check_url = f"{url}/proposals"
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Check my bid", url=check_url)],  # cyan
+                [InlineKeyboardButton("🔗 Check my bid", url=check_url, api_kwargs={"style": "primary"})],
             ])
 
         return await self.send_to_user(chat_id, text, keyboard)
@@ -679,7 +686,7 @@ class Notifier:
         keyboard = None
         if url:
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 View Project", url=url)],  # red
+                [InlineKeyboardButton("🔗 View Project", url=url, api_kwargs={"style": "danger"})],
             ])
 
         return await self.send_to_user(chat_id, text, keyboard)
