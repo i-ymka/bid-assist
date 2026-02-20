@@ -4,7 +4,6 @@ import logging
 from typing import Optional
 from src.filters.base import BaseFilter
 from src.models import Project
-from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +15,11 @@ class BudgetFilter(BaseFilter):
         """Initialize the budget filter.
 
         Args:
-            min_budget: Minimum acceptable budget. If None, uses settings.min_budget.
-            max_budget: Maximum acceptable budget. If None, uses settings.max_budget.
+            min_budget: Minimum acceptable budget. If None, uses default (50).
+            max_budget: Maximum acceptable budget. If None, uses default (3000).
         """
-        self._min_budget = min_budget if min_budget is not None else settings.min_budget
-        self._max_budget = max_budget if max_budget is not None else settings.max_budget
+        self._min_budget = min_budget if min_budget is not None else 50  # Default: $50
+        self._max_budget = max_budget if max_budget is not None else 3000  # Default: $3000
 
     @property
     def name(self) -> str:

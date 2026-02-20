@@ -2,8 +2,10 @@
 
 import logging
 import re
+import time
 from pathlib import Path
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 from src.models import Project, AIAnalysis, Verdict
 from src.config import settings
 
@@ -90,26 +92,53 @@ class AIAnalyzer:
             )
 
         prompt = self._build_prompt(project)
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = self._model.generate_content(
+                    prompt,
+                    generation_config=genai.types.GenerationConfig(
+                        max_output_tokens=1500,
+                        temperature=0.5,
+                    ),
+                )
 
-        try:
-            response = self._model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    max_output_tokens=1500,
-                    temperature=0.5,
-                ),
-            )
+                full_response = response.text.strip()
+                return self._parse_response(full_response)
 
-            full_response = response.text.strip()
-            return self._parse_response(full_response)
+            except google_exceptions.ResourceExhausted as e:
+                retry_delay = 60  # default
+                try:
+                    # Extract delay from error metadata if available
+                    if hasattr(e, 'metadata') and e.metadata:
+                        for meta in e.metadata:
+                            if meta.key == 'retry_delay':
+                                retry_delay = int(meta.value.seconds) + 1
+                                break
+                except (AttributeError, ValueError, IndexError):
+                    pass
+                
+                logger.warning(
+                    f"AI rate limit hit for project {project.id}. "
+                    f"Attempt {attempt + 1}/{max_retries}. Retrying in {retry_delay}s."
+                )
+                
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(f"AI analysis failed for project {project.id} after {max_retries} retries: {e}")
+                    return AIAnalysis(
+                        verdict=Verdict.UNKNOWN,
+                        summary=f"AI analysis error: {str(e)}",
+                        suggested_bid_text="Could not generate bid proposal due to rate limits.",
+                    )
+            except Exception as e:
+                logger.error(f"AI analysis failed for project {project.id}: {e}")
+                break  # Don't retry on other errors
 
-        except Exception as e:
-            logger.error(f"AI analysis failed for project {project.id}: {e}")
-            return AIAnalysis(
-                verdict=Verdict.UNKNOWN,
-                summary=f"AI analysis error: {str(e)}",
-                suggested_bid_text="Could not generate bid proposal.",
-            )
+        # This part is reached if a non-retryable error occurs or retries are exhausted
+        return AIAnalysis(verdict=Verdict.UNKNOWN, summary="AI analysis failed.")
 
     def _build_prompt(self, project: Project) -> str:
         """Build the analysis prompt for a project using template."""

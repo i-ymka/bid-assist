@@ -18,16 +18,28 @@ class Settings(BaseSettings):
 
     # LLM Settings
     llm_model: str = Field("gemini-2.0-flash", alias="LLM_MODEL")
+    gemini_model: str = Field("gemini-3-pro-preview", alias="GEMINI_MODEL")
 
     # Filtering Settings
     blacklist_raw: str = Field("", alias="BL")
     skill_ids_raw: str = Field("", alias="SKILL_IDS")
-    min_budget: int = Field(20, alias="MIN_BUDGET")
-    max_budget: int = Field(250, alias="MAX_BUDGET")
+    allowed_countries_raw: str = Field("", alias="ALLOWED_COUNTRIES")
+    blocked_countries_raw: str = Field("", alias="BLOCKED_COUNTRIES")
+    block_unknown_countries: bool = Field(True, alias="BLOCK_UNKNOWN_COUNTRIES")
+    blocked_currencies_raw: str = Field("", alias="BLOCKED_CURRENCIES")
+    languages_raw: str = Field("en", alias="LANGUAGES")
+    verification_keywords_raw: str = Field(
+        "cryptocurrency,crypto,bitcoin,blockchain,nft,web3",
+        alias="VERIFICATION_KEYWORDS"
+    )
 
     # Application Settings
-    poll_interval: int = Field(300, alias="POLL_INTERVAL")
+    # Note: budget, verified_account, skip_preferred_only, poll_interval are configured in bot via /settings
     log_level: str = Field("INFO", alias="LOG_LEVEL")
+    max_project_age_hours: float = Field(2.0, alias="MAX_PROJECT_AGE_HOURS")
+    ai_request_delay: int = Field(15, alias="AI_REQUEST_DELAY")
+    max_bid_count: int = Field(100, alias="MAX_BID_COUNT")
+    reset_on_start: bool = Field(False, alias="RESET_ON_START")
 
     # User Details
     username: str = Field("Freelancer", alias="USERNAME")
@@ -73,6 +85,51 @@ class Settings(BaseSettings):
             int(skill_id.strip())
             for skill_id in self.skill_ids_raw.split(",")
             if skill_id.strip()
+        ]
+
+    @property
+    def allowed_countries(self) -> List[str]:
+        """Parse comma-separated allowed countries into a list (whitelist)."""
+        return [
+            country.strip().lower()
+            for country in self.allowed_countries_raw.split(",")
+            if country.strip()
+        ]
+
+    @property
+    def blocked_countries(self) -> List[str]:
+        """Parse comma-separated blocked countries into a list (blacklist)."""
+        return [
+            country.strip().lower()
+            for country in self.blocked_countries_raw.split(",")
+            if country.strip()
+        ]
+
+    @property
+    def blocked_currencies(self) -> List[str]:
+        """Parse comma-separated blocked currency codes into a list (e.g., INR, PKR)."""
+        return [
+            currency.strip().upper()
+            for currency in self.blocked_currencies_raw.split(",")
+            if currency.strip()
+        ]
+
+    @property
+    def allowed_languages(self) -> List[str]:
+        """Parse comma-separated language codes into a list."""
+        return [
+            lang.strip().lower()
+            for lang in self.languages_raw.split(",")
+            if lang.strip()
+        ]
+
+    @property
+    def verification_keywords(self) -> List[str]:
+        """Parse comma-separated verification keywords into a list."""
+        return [
+            kw.strip().lower()
+            for kw in self.verification_keywords_raw.split(",")
+            if kw.strip()
         ]
 
 

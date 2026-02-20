@@ -59,6 +59,7 @@ class FreelancerClient:
                 params=params,
                 json=json_data,
                 verify=True,
+                timeout=30,  # 30 second timeout to prevent hanging
             )
             response.raise_for_status()
             return response.json()
@@ -82,6 +83,10 @@ class FreelancerClient:
                 status_code=e.response.status_code,
                 error_code=error_code,
             )
+
+        except requests.exceptions.Timeout as e:
+            logger.error(f"Request timeout: {method} {endpoint} - {e}")
+            raise FreelancerAPIError(message=f"Request timed out: {e}")
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Request error: {method} {endpoint} - {e}")
@@ -116,3 +121,47 @@ class FreelancerClient:
 
         logger.info(f"Authenticated user ID: {self._user_id}")
         return self._user_id
+
+    def get_remaining_bids(self) -> Optional[int]:
+        """Get remaining bid count for the authenticated user.
+
+        Returns:
+            Number of remaining bids, or None if unavailable.
+        """
+        try:
+            response = self.get(USERS_SELF_ENDPOINT, params={
+                "membership_details": "true",
+                "status": "true",
+            })
+            result = response.get("result", {})
+
+            # Search all nested dicts for any key containing "bid" and "remain"
+            def _find_bid_remaining(obj, path=""):
+                if isinstance(obj, dict):
+                    for key, val in obj.items():
+                        if "bid" in key.lower() and "remain" in key.lower():
+                            logger.info(f"Found {path}.{key} = {val}")
+                            if val is not None:
+                                return int(val)
+                        found = _find_bid_remaining(val, f"{path}.{key}")
+                        if found is not None:
+                            return found
+                return None
+
+            remaining = _find_bid_remaining(result, "result")
+            if remaining is not None:
+                return remaining
+
+            # Log available keys for debugging
+            logger.warning(f"bid_remaining not found. Top keys: {list(result.keys())}")
+            membership = result.get("membership_package", {})
+            if membership:
+                logger.debug(f"membership_package keys: {list(membership.keys())}")
+            status = result.get("status", {})
+            if status:
+                logger.debug(f"status keys: {list(status.keys())}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Failed to get remaining bids: {e}")
+            return None

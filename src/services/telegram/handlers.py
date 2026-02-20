@@ -1,7 +1,10 @@
 """Telegram command and callback handlers."""
 
 import logging
+from datetime import datetime
+import html
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import error as telegram_error
 from telegram.ext import (
     ContextTypes,
     CommandHandler,
@@ -13,26 +16,23 @@ from telegram.ext import (
 )
 from src.config import settings
 from src.services.storage import ProjectRepository
-from src.services.freelancer import FreelancerClient, BiddingService
-from src.services.telegram.notifier import (
-    escape_markdown_v2,
-    get_pending_bid,
-    remove_pending_bid,
-    update_pending_bid,
-    create_updated_keyboard,
-)
+from src.services.freelancer import FreelancerClient, BiddingService, ProjectService
+from src.services.freelancer.bidding import strip_markdown
+from src.services.telegram.notifier import create_updated_keyboard, rebuild_bid_message
 from src.models import Bid
 
 logger = logging.getLogger(__name__)
+
 
 # Conversation states
 WAITING_AMOUNT, WAITING_TEXT = range(2)
 
 # Runtime state (shared across handlers)
+# Budget can be changed via /setbudget command
 _runtime_state = {
     "paused": False,
-    "min_budget": settings.min_budget,
-    "max_budget": settings.max_budget,
+    "min_budget": 50,  # Default: $50
+    "max_budget": 3000,  # Default: $3000
 }
 
 # Singleton bidding service
@@ -53,68 +53,125 @@ def get_runtime_state() -> dict:
     return _runtime_state
 
 
-def create_control_keyboard() -> InlineKeyboardMarkup:
-    """Create control panel keyboard based on current state."""
-    is_paused = _runtime_state.get("paused", False)
-
-    if is_paused:
-        toggle_btn = InlineKeyboardButton("▶️ Start", callback_data="control:start")
-    else:
-        toggle_btn = InlineKeyboardButton("⏹️ Stop", callback_data="control:stop")
-
-    status_btn = InlineKeyboardButton("📊 Status", callback_data="control:status")
-    stats_btn = InlineKeyboardButton("📈 Stats", callback_data="control:stats")
-
-    return InlineKeyboardMarkup([
-        [toggle_btn],
-        [status_btn, stats_btn],
-    ])
-
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command - show control panel."""
-    is_paused = _runtime_state.get("paused", False)
-    status_emoji = "⏸️ PAUSED" if is_paused else "▶️ RUNNING"
-
-    text = (
-        f"🤖 *Bid\\-Assist Control Panel*\n\n"
-        f"Status: {status_emoji}\n\n"
-        f"I monitor Freelancer and send you projects with AI analysis\\.\n"
-        f"Click *Place Bid* button to bid on projects you like\\."
+    """Handle /start command - welcome message."""
+    await update.message.reply_text(
+        "👋 Welcome to *Bid-Assist*!\n\n"
+        "I monitor Freelancer for new projects matching your skills "
+        "and help you place bids quickly.\n\n"
+        "Use /help to see all available commands.",
+        parse_mode="Markdown"
     )
 
-    keyboard = create_control_keyboard()
 
-    await update.message.reply_text(
-        text,
-        parse_mode="MarkdownV2",
-        reply_markup=keyboard,
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show available commands."""
+    help_text = """📚 *Available Commands*
+
+*Status & Control*
+/status — Status & Start/Stop bot
+/stats — Statistics
+/bidstats — Bid history
+
+*Settings*
+/settings — Bot settings (budget, poll, auto-bid, filters)
+
+*Your Profile*
+/myprofile — Your profile (skills, keywords, name)
+
+*During Bid Edit*
+/cancel — Cancel current edit
+"""
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
+def _build_status_message(repo: ProjectRepository) -> str:
+    """Build the status message text (HTML)."""
+    from datetime import datetime
+
+    state = get_runtime_state()
+    queue_pending = repo.get_queue_count("pending")
+    queue_analyzing = repo.get_queue_count("analyzing")
+    poll_stats = repo.get_last_poll_stats()
+    bot_start = repo.get_bot_start_time()
+    auto_bid_status = "🟢 On" if repo.is_auto_bid() else "🔴 Off"
+
+    # Stats: session vs all time
+    session_stats = repo.get_bid_stats(since=bot_start)
+    all_stats = repo.get_bid_stats()
+    session_seen = repo.get_processed_count(since=bot_start)
+    all_seen = repo.get_processed_count()
+
+    monitoring_status = "⏸️ PAUSED" if repo.is_paused() else "▶️ RUNNING"
+
+    # Format uptime
+    uptime_str = "unknown"
+    if bot_start:
+        try:
+            start_time = datetime.fromisoformat(bot_start)
+            uptime_seconds = int((datetime.now() - start_time).total_seconds())
+            hours = uptime_seconds // 3600
+            minutes = (uptime_seconds % 3600) // 60
+            if hours > 0:
+                uptime_str = f"{hours}h {minutes}m"
+            else:
+                uptime_str = f"{minutes}m"
+        except Exception:
+            pass
+
+    # Format last poll info
+    last_poll_info = ""
+    if poll_stats:
+        try:
+            poll_time = datetime.fromisoformat(poll_stats["timestamp"])
+            minutes_ago = int((datetime.now() - poll_time).total_seconds() / 60)
+            if minutes_ago < 1:
+                time_str = "just now"
+            elif minutes_ago < 60:
+                time_str = f"{minutes_ago}m ago"
+            else:
+                time_str = f"{minutes_ago // 60}h {minutes_ago % 60}m ago"
+
+            last_poll_info = (
+                f"\n<b>Last poll:</b> {time_str}\n"
+                f"• Found: {poll_stats.get('found', 0)} projects\n"
+                f"• Filtered: {poll_stats.get('filtered', 0)}\n"
+                f"• Queued: {poll_stats.get('queued', 0)}\n"
+                f"• Already bid: {poll_stats.get('already_bid', 0)}"
+            )
+        except Exception as e:
+            logger.error(f"Error formatting poll stats: {e}")
+            last_poll_info = "\n<b>Last poll:</b> unknown"
+
+    # Format avg amount
+    avg_str = f"${session_stats['avg_amount']}"
+    if all_stats['avg_amount'] != session_stats['avg_amount']:
+        avg_str += f" (${all_stats['avg_amount']})"
+
+    return (
+        f"📊 <b>Bid-Assist Status</b>\n\n"
+        f"<b>Monitoring:</b> {monitoring_status}\n"
+        f"<b>Auto-bid:</b> {auto_bid_status}\n"
+        f"<b>Uptime:</b> {uptime_str}\n"
+        f"<b>Queue:</b> {queue_pending} pending, {queue_analyzing} analyzing"
+        f"{last_poll_info}\n\n"
+        f"<b>📈 Statistics</b> <i>(session / all time)</i>\n"
+        f"• Projects seen: {session_seen} ({all_seen})\n"
+        f"• Bids placed: {session_stats['bids_placed']} ({all_stats['bids_placed']})\n"
+        f"• Avg amount: {avg_str}"
     )
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /status command."""
-    state = get_runtime_state()
-    repo = ProjectRepository()
-
-    processed_count = repo.get_processed_count()
-    bid_stats = repo.get_bid_stats()
-
-    monitoring_status = "⏸️ PAUSED" if state["paused"] else "▶️ RUNNING"
-
-    message = (
-        f"📊 *Bid\\-Assist Status*\n\n"
-        f"*Monitoring:* {monitoring_status}\n"
-        f"*Budget range:* ${state['min_budget']} \\- ${state['max_budget']}\n"
-        f"*Poll interval:* {settings.poll_interval}s\n\n"
-        f"*Statistics:*\n"
-        f"• Projects processed: {processed_count}\n"
-        f"• Total bids placed: {bid_stats['total_bids']}\n"
-        f"• Successful bids: {bid_stats['successful_bids']}\n"
-        f"• Avg bid amount: ${bid_stats['avg_amount']}"
-    )
-
-    await update.message.reply_text(message, parse_mode="MarkdownV2")
+    """Handle /status command - show status + control buttons."""
+    try:
+        repo = ProjectRepository()
+        message = _build_status_message(repo)
+        keyboard = get_control_keyboard()
+        await update.message.reply_text(message, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Error in /status command: {e}")
+        await update.message.reply_text(f"❌ Error getting status: {e}")
 
 
 async def cmd_setbudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -153,6 +210,46 @@ async def cmd_setbudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def cmd_setpoll(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setpoll command - change poll interval."""
+    repo = ProjectRepository()
+    args = context.args
+
+    current_interval = repo.get_poll_interval()
+
+    if not args:
+        await update.message.reply_text(
+            f"⏱️ Current poll interval: {current_interval} seconds ({current_interval // 60} min)\n\n"
+            "Usage: /setpoll <seconds>\n"
+            "Example: /setpoll 60 (poll every minute)\n"
+            "Example: /setpoll 300 (poll every 5 minutes)"
+        )
+        return
+
+    try:
+        seconds = int(args[0])
+
+        if seconds < 30:
+            await update.message.reply_text("❌ Minimum interval is 30 seconds")
+            return
+        if seconds > 3600:
+            await update.message.reply_text("❌ Maximum interval is 3600 seconds (1 hour)")
+            return
+
+        repo.set_poll_interval(seconds)
+
+        await update.message.reply_text(
+            f"✅ Poll interval set to {seconds} seconds ({seconds // 60} min {seconds % 60}s)\n\n"
+            f"Next poll cycle will use the new interval."
+        )
+        logger.info(f"Poll interval changed to {seconds}s via Telegram")
+
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid number. Usage: /setpoll <seconds>"
+        )
+
+
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /pause command."""
     if _runtime_state["paused"]:
@@ -181,21 +278,648 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stats command."""
     repo = ProjectRepository()
-    stats = repo.get_bid_stats()
-
-    success_rate = 0
-    if stats["total_bids"] > 0:
-        success_rate = (stats["successful_bids"] / stats["total_bids"]) * 100
+    bot_start = repo.get_bot_start_time()
+    session_stats = repo.get_bid_stats(since=bot_start)
+    all_stats = repo.get_bid_stats()
+    session_seen = repo.get_processed_count(since=bot_start)
+    all_seen = repo.get_processed_count()
 
     message = (
-        f"📈 *Bid Statistics*\n\n"
-        f"Total bids: {stats['total_bids']}\n"
-        f"Successful: {stats['successful_bids']}\n"
-        f"Success rate: {success_rate:.1f}%\n"
-        f"Average amount: ${stats['avg_amount']}"
+        f"📈 *Bid Statistics* _\\(session / all time\\)_\n\n"
+        f"Projects seen: {session_seen} \\({all_seen}\\)\n"
+        f"Bids placed: {session_stats['bids_placed']} \\({all_stats['bids_placed']}\\)\n"
+        f"Avg amount: ${session_stats['avg_amount']} \\(${all_stats['avg_amount']}\\)"
     )
 
     await update.message.reply_text(message, parse_mode="MarkdownV2")
+
+
+async def send_in_chunks(update: Update, text: str, max_length: int = 4096):
+    """Send a long message in chunks, with error handling."""
+    if not text.strip():
+        return
+        
+    try:
+        if len(text) <= max_length:
+            await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+            return
+
+        messages = []
+        current_message = ""
+        for line in text.split('\n'):
+            if len(current_message) + len(line) + 1 > max_length:
+                messages.append(current_message)
+                current_message = ""
+            current_message += line + "\n"
+
+        if current_message:
+            messages.append(current_message)
+
+        for msg in messages:
+            await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
+            
+    except (telegram_error.TimedOut, telegram_error.NetworkError) as e:
+        logger.error(f"Failed to send message to Telegram due to network error: {e}")
+        await update.message.reply_text(
+            "❌ Failed to send the full response due to a network timeout. "
+            "Please check your internet connection or try again later."
+        )
+
+
+async def cmd_bid_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /bidstats command according to user preferences."""
+    await update.message.reply_text("⏳ Fetching bid statistics, please wait...")
+
+    repo = ProjectRepository()
+    project_service = ProjectService()
+    client = FreelancerClient()
+    my_user_id = client.get_user_id()
+    
+    # Get user's preference for this command
+    user_settings = repo.get_user(str(update.effective_chat.id))
+    show_details = user_settings.get('show_bidstats_details', True)
+
+    recent_bids = repo.get_recent_bids(limit=25)
+
+    if not recent_bids:
+        await update.message.reply_text("No recent successful bids found.")
+        return
+
+    # --- 1. Process all projects first ---
+    
+    uninteresting_lines = []
+    win_loss_messages = []
+    win_count, loss_count, other_count = 0, 0, 0
+    
+    AWARDED_STATUSES = {"awarded", "complete", "accepted", "inprogress"}
+    CLOSED_STATUSES = {"closed", "cancelled", "expired"}
+    WINNER_AWARD_STATUSES = {"awarded", "accepted"}
+
+    for project_id, our_bid_amount, bid_date_str, our_bid_text in recent_bids:
+        project = project_service.get_project_details(project_id)
+        if not project:
+            if show_details:
+                uninteresting_lines.append(f"• <b>Project {project_id}</b> - <i>Could not fetch details</i>")
+            other_count += 1
+            continue
+
+        bids, users = project_service.get_project_bids(project_id)
+        winning_bid = next((b for b in bids if b.get('award_status') in WINNER_AWARD_STATUSES), None)
+        
+        # Determine outcome
+        outcome = "OPEN"
+        winner_amount = 0.0
+        
+        if winning_bid:
+             winner_amount = winning_bid.get('amount', 0.0)
+
+        if winning_bid and winner_amount > 0:
+            outcome = "LOSS" if winning_bid.get('bidder_id') != my_user_id else "MY_WIN"
+        elif project.status in AWARDED_STATUSES:
+            # Awarded but we don't see a winning bid with amount > 0 or status 'awarded' in bids list
+            # This usually means it's sealed or hidden
+            outcome = "SEALED"
+        elif project.status in CLOSED_STATUSES:
+            outcome = "NO_WINNER"
+
+        # Format Date
+        try:
+            date_obj = datetime.fromisoformat(bid_date_str)
+            date_fmt = date_obj.strftime("%d %b %Y")
+        except:
+            date_fmt = bid_date_str
+
+        # Clean title link (no explicit ID in text, ID in link is fine)
+        title_link = f"<a href='{project.url}'>{html.escape(project.title)}</a>"
+
+        if outcome == "LOSS":
+            loss_count += 1
+            winner_user = users.get(str(winning_bid.get('bidder_id')), {})
+            winner_country = winner_user.get('location', {}).get('country', {}).get('name', 'N/A')
+            winner_proposal = html.escape(winning_bid.get('description', '')) or '<i>(No text)</i>'
+            
+            msg = f"❌ <b>{title_link}</b>\n"
+            msg += f"Bid placed on: {date_fmt}\n"
+            msg += f"Your Bid: ${our_bid_amount:.2f}\n"
+            msg += f"Winning Bid: ${winner_amount:.2f} ({winner_country})\n"
+            msg += "<blockquote>" + winner_proposal + "</blockquote>"
+            win_loss_messages.append(msg)
+            
+        elif outcome == "MY_WIN":
+            win_count += 1
+            msg = f"✅ <b>{title_link}</b>\n"
+            msg += f"Bid placed on: {date_fmt}\n"
+            msg += f"<b>You won! Price: ${our_bid_amount:.2f}</b>\n"
+            msg += "<blockquote>" + html.escape(our_bid_text) + "</blockquote>"
+            win_loss_messages.append(msg)
+
+        else: # Sealed, No Winner, or Open
+            other_count += 1
+            if show_details:
+                if outcome == "SEALED":
+                    uninteresting_lines.append(f"🔒 {title_link} - <i>Winner hidden</i>")
+                elif outcome == "NO_WINNER":
+                    uninteresting_lines.append(f"🚫 {title_link} - <i>Closed, no winner</i>")
+                else: # OPEN
+                    uninteresting_lines.append(f"⏳ {title_link} - <i>Active</i>")
+
+    # --- 2. Send all messages ---
+
+    # Send the block of uninteresting projects first, if applicable and enabled
+    if show_details and uninteresting_lines:
+        uninteresting_message = "📊 <b>Other Projects</b>\n\n" + "\n".join(uninteresting_lines)
+        await send_in_chunks(update, uninteresting_message, max_length=2000)
+
+    # Send the detailed win/loss cards (one by one as requested for clarity)
+    if win_loss_messages:
+        await update.message.reply_text(f"<b>Detailed Results ({len(win_loss_messages)}):</b>", parse_mode="HTML")
+        for msg in win_loss_messages:
+            try:
+                await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
+            except telegram_error.TelegramError as e:
+                logger.error(f"Failed to send stats card: {e}")
+                # Fallback to simple text if HTML fails
+                await update.message.reply_text("❌ Error sending a details card (formatting issue).")
+
+    # Send the final summary
+    summary_message = (
+        "🏁 <b>Summary</b>\n"
+        f"Reviewed: {len(recent_bids)}\n"
+        f"✅ Won: {win_count}\n"
+        f"❌ Lost: {loss_count}\n"
+        f"⚪ Other: {other_count}\n"
+        f"<i>(Use /myprofile to toggle 'Other' projects list)</i>"
+    )
+    await update.message.reply_text(summary_message, parse_mode="HTML")
+
+
+async def cmd_setskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setskills command - set personal skill IDs for filtering.
+
+    Usage: /setskills 13,14,29,36 (skill IDs from Freelancer URL)
+           /setskills default (use global settings)
+           /setskills (show current)
+    """
+    repo = ProjectRepository()
+    chat_id = str(update.effective_chat.id)
+    user = repo.get_user(chat_id)
+
+    if not user:
+        await update.message.reply_text(
+            "❌ You are not registered. Contact admin to add you."
+        )
+        return
+
+    args = context.args
+
+    if not args:
+        # Show current skills
+        current = user.get("skill_ids", "") or "default (global)"
+        await update.message.reply_text(
+            f"🔧 *Your Skill IDs:* {current}\n\n"
+            f"*Usage:*\n"
+            f"`/setskills 13,14,29,36` \\- set specific skills\n"
+            f"`/setskills default` \\- use global skills\n\n"
+            f"*How to get skill IDs:*\n"
+            f"1\\. Go to freelancer\\.com/search/projects\n"
+            f"2\\. Select skills you want\n"
+            f"3\\. Copy numbers from URL: `?projectSkills=13,14,29`",
+            parse_mode="MarkdownV2"
+        )
+        return
+
+    skill_ids_str = " ".join(args).replace(" ", "")
+
+    if skill_ids_str.lower() == "default":
+        skill_ids_str = ""
+
+    # Validate: should be comma-separated numbers
+    if skill_ids_str:
+        parts = skill_ids_str.split(",")
+        valid = all(p.strip().isdigit() for p in parts if p.strip())
+        if not valid:
+            await update.message.reply_text(
+                "❌ Invalid format. Use comma-separated numbers.\n"
+                "Example: /setskills 13,14,29,36"
+            )
+            return
+
+    repo.update_user_skills(chat_id, skill_ids_str)
+
+    if skill_ids_str:
+        await update.message.reply_text(
+            f"✅ Skill IDs updated: {skill_ids_str}"
+        )
+    else:
+        await update.message.reply_text(
+            "✅ Using default (global) skill IDs"
+        )
+
+
+async def cmd_setkeywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setkeywords command - set keywords for project matching.
+
+    Usage: /setkeywords fivem,gta,lua (only get matching projects)
+           /setkeywords (clear = get ALL projects)
+    """
+    repo = ProjectRepository()
+    chat_id = str(update.effective_chat.id)
+    user = repo.get_user(chat_id)
+
+    if not user:
+        await update.message.reply_text(
+            "❌ You are not registered. Contact admin to add you."
+        )
+        return
+
+    args = context.args
+
+    if not args:
+        # Clear keywords = get all projects
+        current = user.get("keywords", "")
+        if current:
+            # Show current keywords
+            await update.message.reply_text(
+                f"🔑 *Your Keywords:* {current}\n\n"
+                f"Keywords are matched against: title, description, skill tags\n\n"
+                f"*Usage:*\n"
+                f"`/setkeywords fivem,gta,lua` \\- only matching projects\n"
+                f"`/setkeywords clear` \\- receive ALL projects",
+                parse_mode="MarkdownV2"
+            )
+        else:
+            await update.message.reply_text(
+                f"🔑 *Your Keywords:* \\(none \\- receiving ALL projects\\)\n\n"
+                f"*Usage:*\n"
+                f"`/setkeywords fivem,gta,lua` \\- only matching projects",
+                parse_mode="MarkdownV2"
+            )
+        return
+
+    keywords_str = " ".join(args).lower()
+
+    if keywords_str == "clear":
+        keywords_str = ""
+
+    repo.update_user_keywords(chat_id, keywords_str)
+
+    if keywords_str:
+        await update.message.reply_text(
+            f"✅ Keywords updated: {keywords_str}\n\n"
+            f"You'll only receive projects matching these keywords."
+        )
+    else:
+        await update.message.reply_text(
+            "✅ Keywords cleared. You'll receive ALL projects."
+        )
+
+
+def _get_profile_keyboard(user_settings: dict) -> InlineKeyboardMarkup:
+    """Create the keyboard for the profile message."""
+    skip_status = "🔕 Off" if user_settings.get('receive_skipped') else "✅ On"
+    stats_status = "Compact" if user_settings.get('show_bidstats_details') else "Full"
+    
+    keyboard = [
+        [
+            InlineKeyboardButton(f"Skipped Projects: {skip_status}", callback_data="profile:toggle_skip"),
+        ],
+        [
+            InlineKeyboardButton(f"/bidstats Mode: {stats_status}", callback_data="profile:toggle_stats"),
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def cmd_myprofile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /myprofile command - show current user settings."""
+    repo = ProjectRepository()
+    chat_id = str(update.effective_chat.id)
+    user = repo.get_user(chat_id)
+
+    if not user:
+        await update.message.reply_text(
+            "❌ You are not registered. Contact admin to add you."
+        )
+        return
+
+    name = user.get("name", "Unknown")
+    skills = user.get("skill_ids", "") or "default (global)"
+    keywords = user.get("keywords", "") or "(none - ALL projects)"
+    is_active = "✅ Active" if user.get("is_active", 1) else "❌ Inactive"
+    
+    # These settings are now in the keyboard
+    # receive_skipped = "✅ On" if user.get("receive_skipped", 1) else "🔕 Off"
+    # show_bidstats = "Full" if user.get("show_bidstats_details", 1) else "Compact"
+
+    message = (
+        f"👤 <b>Your Profile</b>\n\n"
+        f"<b>Name:</b> {name}\n"
+        f"<b>Status:</b> {is_active}\n"
+        f"<b>Skill IDs:</b> {skills}\n"
+        f"<b>Keywords:</b> {keywords}\n\n"
+        f"Use the buttons below to toggle notification settings."
+    )
+
+    keyboard = _get_profile_keyboard(user)
+    await update.message.reply_text(message, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def cmd_setname(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setname command - set display name.
+
+    Usage: /setname Ymka
+    """
+    repo = ProjectRepository()
+    chat_id = str(update.effective_chat.id)
+    user = repo.get_user(chat_id)
+
+    if not user:
+        await update.message.reply_text(
+            "❌ You are not registered. Contact admin to add you."
+        )
+        return
+
+    args = context.args
+
+    if not args:
+        current = user.get("name", "Unknown")
+        await update.message.reply_text(
+            f"👤 Your current name: {current}\n\n"
+            f"Usage: /setname <name>\n"
+            f"Example: /setname Ymka"
+        )
+        return
+
+    new_name = " ".join(args)
+
+    try:
+        with repo._conn:
+            repo._conn.execute(
+                "UPDATE user_settings SET name = ? WHERE chat_id = ?",
+                (new_name, chat_id),
+            )
+        await update.message.reply_text(f"✅ Name updated to: {new_name}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to update name: {e}")
+
+
+async def handle_profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle callbacks from the /myprofile keyboard."""
+    query = update.callback_query
+    await query.answer()
+
+    repo = ProjectRepository()
+    chat_id = str(query.effective_chat.id)
+    
+    action = query.data.split(":")[1]
+
+    if action == "toggle_skip":
+        repo.toggle_receive_skipped(chat_id)
+    elif action == "toggle_stats":
+        repo.toggle_show_bidstats_details(chat_id)
+
+    # Refresh the profile message
+    user = repo.get_user(chat_id)
+    name = user.get("name", "Unknown")
+    skills = user.get("skill_ids", "") or "default (global)"
+    keywords = user.get("keywords", "") or "(none - ALL projects)"
+    is_active = "✅ Active" if user.get("is_active", 1) else "❌ Inactive"
+    
+    message = (
+        f"👤 <b>Your Profile</b>\n\n"
+        f"<b>Name:</b> {name}\n"
+        f"<b>Status:</b> {is_active}\n"
+        f"<b>Skill IDs:</b> {skills}\n"
+        f"<b>Keywords:</b> {keywords}\n\n"
+        f"Use the buttons below to toggle notification settings."
+    )
+
+    keyboard = _get_profile_keyboard(user)
+    await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
+
+
+def _build_settings_message(repo: ProjectRepository) -> str:
+    """Build the settings message text."""
+    state = get_runtime_state()
+
+    verified_status = "✅ Verified" if repo.is_verified() else "❌ Not verified"
+    skip_preferred_status = "✅ On" if repo.skip_preferred_only() else "🔕 Off"
+    auto_bid_status = "🟢 On" if repo.is_auto_bid() else "🔴 Off"
+
+    verified_hint = "(crypto projects)" if verified_status == "❌ Not verified" else "(all projects)"
+    skip_hint = "(skip)" if skip_preferred_status == "✅ On" else "(show)"
+    auto_bid_hint = "(bids placed automatically)" if repo.is_auto_bid() else "(manual confirmation)"
+
+    return (
+        f"⚙️ <b>Bot Settings</b>\n\n"
+        f"<b>Filters:</b>\n"
+        f"• Budget range: ${state['min_budget']} - ${state['max_budget']}\n"
+        f"• Poll interval: {repo.get_poll_interval()}s\n"
+        f"• My account verified: {verified_status} {verified_hint}\n"
+        f"• Preferred-only projects: {skip_preferred_status} {skip_hint}\n"
+        f"• Languages: {', '.join(settings.allowed_languages) if settings.allowed_languages else 'all'}\n"
+        f"• Blocked currencies: {', '.join(settings.blocked_currencies) if settings.blocked_currencies else 'none'}\n\n"
+        f"<b>Bidding:</b>\n"
+        f"• Auto-bid: {auto_bid_status} {auto_bid_hint}\n\n"
+        f"<i>Use the buttons below to change settings</i>"
+    )
+
+
+def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
+    """Create the keyboard for the settings message."""
+    verified_status = "✅ On" if repo.is_verified() else "🔕 Off"
+    skip_preferred_status = "✅ On" if repo.skip_preferred_only() else "🔕 Off"
+    auto_bid_status = "🟢 On" if repo.is_auto_bid() else "🔴 Off"
+    state = get_runtime_state()
+
+    auto_bid_style = 3 if repo.is_auto_bid() else 0  # green when on, red when off
+    keyboard = [
+        [
+            InlineKeyboardButton(f"💰 Budget: ${state['min_budget']}-${state['max_budget']}", callback_data="settings:budget"),
+        ],
+        [
+            InlineKeyboardButton(f"⏱️ Poll: {repo.get_poll_interval()}s", callback_data="settings:poll"),
+        ],
+        [
+            InlineKeyboardButton(f"Verified Account: {verified_status}", callback_data="settings:verified"),
+        ],
+        [
+            InlineKeyboardButton(f"Skip Preferred-Only: {skip_preferred_status}", callback_data="settings:skip_preferred"),
+        ],
+        [
+            InlineKeyboardButton(f"Auto-Bid: {auto_bid_status}", callback_data="settings:auto_bid", api_kwargs={"style": auto_bid_style}),
+        ],
+        [
+            InlineKeyboardButton("🔧 Skills & Keywords", callback_data="settings:skills_keywords"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /settings command - show all bot settings with interactive controls."""
+    repo = ProjectRepository()
+    message = _build_settings_message(repo)
+    keyboard = _get_settings_keyboard(repo)
+    await update.message.reply_text(message, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle callbacks from the /settings keyboard."""
+    query = update.callback_query
+    await query.answer()
+
+    repo = ProjectRepository()
+    action = query.data.split(":")[1]
+
+    if action == "verified":
+        current = repo.is_verified()
+        repo.set_verified(not current)
+
+        message = _build_settings_message(repo)
+        keyboard = _get_settings_keyboard(repo)
+        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
+
+    elif action == "skip_preferred":
+        current = repo.skip_preferred_only()
+        repo.set_skip_preferred_only(not current)
+
+        message = _build_settings_message(repo)
+        keyboard = _get_settings_keyboard(repo)
+        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
+
+    elif action == "auto_bid":
+        current = repo.is_auto_bid()
+        repo.set_auto_bid(not current)
+
+        message = _build_settings_message(repo)
+        keyboard = _get_settings_keyboard(repo)
+        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
+
+    elif action == "budget":
+        await query.answer("Use /setbudget <min> <max> to change budget range", show_alert=True)
+
+    elif action == "poll":
+        await query.answer("Use /setpoll <seconds> to change poll interval", show_alert=True)
+
+    elif action == "skills_keywords":
+        # Show myprofile message
+        chat_id = str(query.effective_chat.id)
+        user = repo.get_user(chat_id)
+        name = user.get("name", "Unknown")
+        skills = user.get("skill_ids", "") or "default (global)"
+        keywords = user.get("keywords", "") or "(none - ALL projects)"
+        is_active = "✅ Active" if user.get("is_active", 1) else "❌ Inactive"
+
+        receive_skipped = user.get("receive_skipped", 1)
+        skip_status = "✅ On" if receive_skipped else "🔕 Off"
+
+        bidstats_details = user.get("show_bidstats_details", 1)
+        bidstats_status = "✅ On" if bidstats_details else "🔕 Off"
+
+        profile_message = (
+            f"👤 <b>Your Profile</b>\n\n"
+            f"<b>Name:</b> {name}\n"
+            f"<b>Status:</b> {is_active}\n"
+            f"<b>Skill IDs:</b> {skills}\n"
+            f"<b>Keywords:</b> {keywords}\n\n"
+            f"<b>Notifications:</b>\n"
+            f"• Skip notifications: {skip_status}\n"
+            f"• Bid stats details: {bidstats_status}\n\n"
+            f"<i>Use /myprofile for more options</i>"
+        )
+
+        await query.edit_message_text(profile_message, parse_mode="HTML")
+
+
+async def cmd_setverified(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setverified command - toggle verified account status.
+
+    Usage: /setverified on|off
+           /setverified (show current)
+    """
+    repo = ProjectRepository()
+    args = context.args
+
+    current = repo.is_verified()
+
+    if not args:
+        status = "✅ Verified" if current else "❌ Not verified"
+        keywords = ", ".join(settings.verification_keywords) if settings.verification_keywords else "(none)"
+
+        await update.message.reply_text(
+            f"🔒 <b>Account Verification Status</b>\n\n"
+            f"Status: {status}\n"
+            f"Filtered keywords: {keywords}\n\n"
+            f"If not verified, projects with crypto/blockchain keywords are filtered out.\n\n"
+            f"<b>Usage:</b>\n"
+            f"<code>/setverified on</code> - I have verified account\n"
+            f"<code>/setverified off</code> - Filter crypto projects",
+            parse_mode="HTML"
+        )
+        return
+
+    arg = args[0].lower()
+
+    if arg in ("on", "true", "yes", "1"):
+        repo.set_verified(True)
+        await update.message.reply_text(
+            "✅ Verified account: <b>ON</b>\n\n"
+            "Crypto/blockchain projects will now be shown.",
+            parse_mode="HTML"
+        )
+        logger.info("Verified account set to ON via Telegram")
+    elif arg in ("off", "false", "no", "0"):
+        repo.set_verified(False)
+        await update.message.reply_text(
+            "❌ Verified account: <b>OFF</b>\n\n"
+            "Crypto/blockchain projects will be filtered out.",
+            parse_mode="HTML"
+        )
+        logger.info("Verified account set to OFF via Telegram")
+    else:
+        await update.message.reply_text(
+            "❌ Invalid value. Use: /setverified on or /setverified off"
+        )
+
+
+def get_control_keyboard() -> InlineKeyboardMarkup:
+    """Get control panel keyboard based on current state."""
+    repo = ProjectRepository()
+    is_paused = repo.is_paused()
+
+    if is_paused:
+        button = InlineKeyboardButton("▶️ Start", callback_data="control:start", api_kwargs={"style": 3})  # green
+    else:
+        button = InlineKeyboardButton("⏹️ Stop", callback_data="control:stop", api_kwargs={"style": 0})  # red
+
+    return InlineKeyboardMarkup([[button]])
+
+
+async def cmd_control(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /control command - same as /status."""
+    await cmd_status(update, context)
+
+
+async def handle_control_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle Start/Stop button clicks."""
+    query = update.callback_query
+    await query.answer()
+
+    repo = ProjectRepository()
+    action = query.data.split(":")[1]
+
+    if action == "start":
+        repo.set_paused(False)
+        logger.info("Monitoring STARTED via control panel")
+    else:  # stop
+        repo.set_paused(True)
+        logger.info("Monitoring STOPPED via control panel")
+
+    # Refresh status message with control buttons
+    message = _build_status_message(repo)
+    keyboard = get_control_keyboard()
+    await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def handle_edit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -211,7 +935,8 @@ async def handle_edit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
     # Check if bid still exists
-    bid_data = get_pending_bid(project_id)
+    repo = ProjectRepository()
+    bid_data = repo.get_pending_bid(project_id)
     if not bid_data:
         await query.message.reply_text("❌ Bid data expired.")
         return ConversationHandler.END
@@ -251,23 +976,36 @@ async def receive_new_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return WAITING_AMOUNT
 
     # Update the pending bid
-    bid_data = update_pending_bid(project_id, amount=new_amount)
+    repo = ProjectRepository()
+    bid_data = repo.update_pending_bid(project_id, amount=new_amount)
     if not bid_data:
         await update.message.reply_text("❌ Bid data expired.")
         return ConversationHandler.END
 
     currency = bid_data.get("currency", "USD")
 
-    # Update the original message keyboard with new amount
+    # Update the original message with new amount (full message + keyboard)
     try:
-        new_keyboard = create_updated_keyboard(project_id, new_amount)
-        await original_message.edit_reply_markup(reply_markup=new_keyboard)
+        new_text = rebuild_bid_message(bid_data)
+        new_keyboard = create_updated_keyboard(project_id, new_amount, currency)
+        await original_message.edit_text(
+            text=new_text,
+            parse_mode="MarkdownV2",
+            reply_markup=new_keyboard,
+            disable_web_page_preview=True,
+        )
+        logger.info(f"Updated original message with new amount: {new_amount} {currency}")
     except Exception as e:
-        logger.error(f"Failed to update keyboard: {e}")
+        logger.error(f"Failed to update original message: {e}")
+        # Fallback: at least update the keyboard
+        try:
+            new_keyboard = create_updated_keyboard(project_id, new_amount, currency)
+            await original_message.edit_reply_markup(reply_markup=new_keyboard)
+        except Exception as e2:
+            logger.error(f"Failed to update keyboard: {e2}")
 
     await update.message.reply_text(
-        f"✅ Amount updated to {new_amount:.0f} {currency}\n\n"
-        f"Go back to the project message and click 'Place Bid' when ready!"
+        f"✅ Amount updated to {new_amount:.0f} {currency}"
     )
 
     # Clear context
@@ -290,7 +1028,8 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     # Check if bid still exists
-    bid_data = get_pending_bid(project_id)
+    repo = ProjectRepository()
+    bid_data = repo.get_pending_bid(project_id)
     if not bid_data:
         await query.message.reply_text("❌ Bid data expired.")
         return ConversationHandler.END
@@ -298,10 +1037,13 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Store project_id in context for later use
     context.user_data["editing_project_id"] = project_id
 
-    current_text = bid_data.get("description", "")[:200]  # Show preview
+    current_text = bid_data.get("description", "")  # Show full text
+
+    # Store original message for updating later
+    context.user_data["original_message"] = query.message
 
     await query.message.reply_text(
-        f"📝 Current proposal preview:\n```\n{current_text}...\n```\n\n"
+        f"📝 Current proposal:\n```\n{current_text}\n```\n\n"
         f"Send your new bid proposal text:\n"
         f"Or send /cancel to cancel",
         parse_mode="Markdown"
@@ -312,6 +1054,7 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_new_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Receive new bid text from user."""
     project_id = context.user_data.get("editing_project_id")
+    original_message = context.user_data.get("original_message")
 
     if not project_id:
         await update.message.reply_text("❌ No edit in progress")
@@ -327,20 +1070,37 @@ async def receive_new_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_TEXT
 
     # Update the pending bid
-    bid_data = update_pending_bid(project_id, description=new_text)
+    repo = ProjectRepository()
+    bid_data = repo.update_pending_bid(project_id, description=new_text)
     if not bid_data:
         await update.message.reply_text("❌ Bid data expired.")
         return ConversationHandler.END
 
+    currency = bid_data.get("currency", "USD")
+    amount = bid_data.get("amount", 0)
+
+    # Update the original message with new proposal (full message + keyboard)
+    if original_message:
+        try:
+            new_message_text = rebuild_bid_message(bid_data)
+            new_keyboard = create_updated_keyboard(project_id, amount, currency)
+            await original_message.edit_text(
+                text=new_message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=new_keyboard,
+                disable_web_page_preview=True,
+            )
+            logger.info(f"Updated original message with new proposal for project {project_id}")
+        except Exception as e:
+            logger.error(f"Failed to update original message: {e}")
+
     await update.message.reply_text(
-        f"✅ Proposal updated!\n\n"
-        f"Preview:\n```\n{new_text[:200]}...\n```\n\n"
-        f"Go back to the project message and click 'Place Bid' when ready!",
-        parse_mode="Markdown"
+        f"✅ Proposal updated!"
     )
 
     # Clear context
     context.user_data.pop("editing_project_id", None)
+    context.user_data.pop("original_message", None)
 
     return ConversationHandler.END
 
@@ -353,105 +1113,224 @@ async def cancel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-async def handle_control_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle control panel button clicks."""
+async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Ask for Bid Anyway' button click on skipped projects."""
     query = update.callback_query
     await query.answer()
 
-    action = query.data.split(":")[1] if ":" in query.data else ""
-
-    if action == "start":
-        _runtime_state["paused"] = False
-        status_text = "▶️ Monitoring STARTED"
-        logger.info("Monitoring started via control panel")
-
-    elif action == "stop":
-        _runtime_state["paused"] = True
-        status_text = "⏹️ Monitoring STOPPED"
-        logger.info("Monitoring stopped via control panel")
-
-    elif action == "status":
-        repo = ProjectRepository()
-        processed_count = repo.get_processed_count()
-        is_paused = _runtime_state.get("paused", False)
-        status_emoji = "⏸️ PAUSED" if is_paused else "▶️ RUNNING"
-
-        status_text = (
-            f"📊 Status: {status_emoji}\n"
-            f"💰 Budget: ${_runtime_state['min_budget']} - ${_runtime_state['max_budget']}\n"
-            f"📁 Processed: {processed_count} projects"
-        )
-
-    elif action == "stats":
-        repo = ProjectRepository()
-        stats = repo.get_bid_stats()
-        success_rate = 0
-        if stats["total_bids"] > 0:
-            success_rate = (stats["successful_bids"] / stats["total_bids"]) * 100
-
-        status_text = (
-            f"📈 Bid Statistics\n\n"
-            f"Total bids: {stats['total_bids']}\n"
-            f"Successful: {stats['successful_bids']}\n"
-            f"Success rate: {success_rate:.1f}%\n"
-            f"Avg amount: ${stats['avg_amount']}"
-        )
-    else:
-        status_text = "Unknown action"
-
-    # Update the message with new keyboard
-    is_paused = _runtime_state.get("paused", False)
-    main_status = "⏸️ PAUSED" if is_paused else "▶️ RUNNING"
-
-    text = (
-        f"🤖 *Bid\\-Assist Control Panel*\n\n"
-        f"Status: {main_status}\n\n"
-        f"{escape_markdown_v2(status_text)}"
-    )
-
-    keyboard = create_control_keyboard()
-
-    try:
-        await query.edit_message_text(
-            text,
-            parse_mode="MarkdownV2",
-            reply_markup=keyboard,
-        )
-    except Exception:
-        # Message unchanged, just update keyboard
-        await query.edit_message_reply_markup(reply_markup=keyboard)
-
-
-async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle 'Place Bid' button click."""
-    query = update.callback_query
-    await query.answer()  # Acknowledge the button click
-
-    # Parse callback data: "bid:{project_id}"
+    # Parse callback data: "ask_bid:{project_id}"
     data = query.data
-    if not data.startswith("bid:"):
+    if not data.startswith("ask_bid:"):
         return
 
     try:
         project_id = int(data.split(":")[1])
     except (IndexError, ValueError):
-        await query.edit_message_text("❌ Invalid bid data")
+        await query.edit_message_text("❌ Invalid project data")
         return
 
-    # Get pending bid data
-    bid_data = get_pending_bid(project_id)
-    if not bid_data:
+    # Get project data from queue
+    repo = ProjectRepository()
+    project_data = repo.get_project_from_queue(project_id)
+    if not project_data:
         await query.edit_message_text(
-            "❌ Bid data expired. Please wait for the next notification."
+            "❌ Project data not found. It may have been too long since the skip."
         )
         return
 
-    # Show "placing bid..." status
-    await query.edit_message_text("⏳ Placing bid...")
+    # Store original skip message text
+    original_text = query.message.text_markdown_v2 if query.message.text_markdown_v2 else query.message.text
+
+    # Edit skip message to show we're generating bid
+    from src.services.telegram.notifier import escape_markdown_v2
+    await query.edit_message_text(
+        original_text + "\n\n⏳ _Generating bid\\.\\.\\._",
+        parse_mode="MarkdownV2",
+        disable_web_page_preview=True,
+    )
+
+    # Import and call force_bid_analysis
+    import asyncio
+    from src.services.ai.gemini_analyzer import force_bid_analysis
+
+    # Format budget string
+    budget_min = project_data.get("budget_min", 0)
+    budget_max = project_data.get("budget_max", 0)
+    currency = project_data.get("currency", "USD")
+    url = project_data.get("url", "")
+    bid_count = project_data.get("bid_count", 0)
+    avg_bid = project_data.get("avg_bid", 0)
+
+    if budget_min and budget_max:
+        budget_str = f"${budget_min:.0f} - ${budget_max:.0f} {currency}"
+    elif budget_max:
+        budget_str = f"up to ${budget_max:.0f} {currency}"
+    else:
+        budget_str = "Not specified"
+
+    # Run analysis in thread pool (it's blocking)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        force_bid_analysis,
+        project_id,
+        project_data["title"],
+        project_data["description"],
+        budget_str,
+        avg_bid,
+        bid_count,
+    )
+
+    if not result:
+        # Restore original message with error
+        await query.edit_message_text(
+            original_text + "\n\n❌ _AI analysis failed\\. Try again later\\._",
+            parse_mode="MarkdownV2",
+            disable_web_page_preview=True,
+        )
+        return
+
+    # Store as pending bid (with all context for later edits/retry)
+    repo.add_pending_bid(
+        project_id=project_id,
+        amount=result.amount,
+        period=result.period,
+        description=result.bid_text,
+        title=project_data["title"],
+        currency=currency,
+        url=url,
+        bid_count=bid_count,
+        summary=result.summary,
+        budget_min=budget_min,
+        budget_max=budget_max,
+        client_country=project_data.get("client_country", ""),
+        avg_bid=avg_bid,
+    )
+
+    # Update skip message to show "Asked for bid anyway ↓"
+    await query.edit_message_text(
+        original_text + "\n\n🔄 _Asked for bid anyway ↓_",
+        parse_mode="MarkdownV2",
+        disable_web_page_preview=True,
+    )
+
+    # Reply with bid info (no summary - context is in parent message)
+    # Clean markdown from bid text before displaying
+    bid_text_clean = strip_markdown(result.bid_text)
+    bid_text_escaped = escape_markdown_v2(bid_text_clean)
+    currency_escaped = escape_markdown_v2(currency)
+
+    reply_text = (
+        f"💡 *AI Generated Bid:*\n"
+        f"  💵 Amount: {result.amount:.0f} {currency_escaped} for {result.period} days\n\n"
+        f"👇 *Bid Proposal:*\n```\n{bid_text_escaped}\n```"
+    )
+
+    # Create bid buttons
+    edit_amount_btn = InlineKeyboardButton(
+        "✏️ Edit Amount",
+        callback_data=f"edit_amount:{project_id}",
+        api_kwargs={"style": 5},  # blue
+    )
+    edit_text_btn = InlineKeyboardButton(
+        "✏️ Edit Proposal",
+        callback_data=f"edit_text:{project_id}",
+        api_kwargs={"style": 5},  # blue
+    )
+    bid_btn = InlineKeyboardButton(
+        f"💰 Place Bid ({result.amount:.0f} {currency})",
+        callback_data=f"bid:{project_id}",
+        api_kwargs={"style": 3},  # green
+    )
+    keyboard = InlineKeyboardMarkup([
+        [edit_amount_btn, edit_text_btn],
+        [bid_btn]
+    ])
+
+    # Reply to the skip message with bid info
+    await query.message.reply_text(
+        reply_text,
+        parse_mode="MarkdownV2",
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
+
+    logger.info(f"Force bid generated for project {project_id}: {result.amount} {currency}")
+
+
+async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Place Bid' button click."""
+    query = update.callback_query
+
+    # Parse callback data: "bid:{project_id}"
+    data = query.data
+    if not data.startswith("bid:"):
+        await query.answer()
+        return
+
+    try:
+        project_id = int(data.split(":")[1])
+    except (IndexError, ValueError):
+        await query.answer("❌ Invalid bid data", show_alert=True)
+        return
+
+    # Get pending bid data (this is the CURRENT data - might have been edited by teammate)
+    repo = ProjectRepository()
+    bid_data = repo.get_pending_bid(project_id)
+    if not bid_data:
+        await query.answer("❌ Bid data expired", show_alert=True)
+        return
+
+    # Lazy sync: refresh message with latest data (in case teammate edited)
+    # This ensures user sees current proposal/amount before placing bid
+    try:
+        new_text = rebuild_bid_message(bid_data)
+        new_keyboard = create_updated_keyboard(
+            project_id,
+            bid_data["amount"],
+            bid_data.get("currency", "USD")
+        )
+        await query.message.edit_text(
+            text=new_text,
+            parse_mode="MarkdownV2",
+            reply_markup=new_keyboard,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        # If message is unchanged or edit fails, continue anyway
+        logger.debug(f"Could not refresh message (may be unchanged): {e}")
+
+    # Check if bid was already placed by another user
+    if repo.is_project_bidded(project_id):
+        await query.answer("Bid already placed by teammate!", show_alert=True)
+
+        # Get URL for "Check my bid" button
+        url = bid_data.get("url", "")
+        check_bid_url = f"{url}/proposals" if url else ""
+
+        from src.services.telegram.notifier import escape_markdown_v2
+        status_text = "\n\n✅ *Bid already placed by teammate\\!*"
+
+        keyboard = None
+        if check_bid_url:
+            check_btn = InlineKeyboardButton(
+                "🔗 Check my bid",
+                url=check_bid_url,
+                api_kwargs={"style": 4},  # cyan
+            )
+            keyboard = InlineKeyboardMarkup([[check_btn]])
+
+        try:
+            await query.edit_message_reply_markup(reply_markup=keyboard)
+        except Exception as e:
+            logger.warning(f"Could not update keyboard: {e}")
+        return
+
+    # Show loading indicator via callback answer (doesn't modify message)
+    await query.answer("⏳ Placing bid...")
 
     # Place the bid
     bidding_service = get_bidding_service()
-    repo = ProjectRepository()
 
     bid = Bid(
         project_id=project_id,
@@ -463,8 +1342,10 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     result = bidding_service.place_bid(bid)
 
-    # Get currency before removing from pending
+    # Get data before removing from pending
     currency = bid_data.get("currency", "USD")
+    url = bid_data.get("url", "")
+    bid_count = bid_data.get("bid_count", 0)
 
     # Record in database
     repo.add_bid_record(
@@ -477,34 +1358,221 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
     # Remove from pending
-    remove_pending_bid(project_id)
+    repo.remove_pending_bid(project_id)
 
     # Update message with result
     if result.success:
-        await query.edit_message_text(
-            f"✅ Bid placed successfully!\n\n"
-            f"Project: {bid_data['title']}\n"
-            f"Amount: {bid_data['amount']:.0f} {currency}\n"
-            f"Period: {bid_data['period']} days"
-        )
+        # Check remaining bids
+        remaining_text = ""
+        try:
+            remaining = bidding_service.get_remaining_bids()
+            if remaining is not None:
+                remaining_text = f"🎟️ Remaining: {remaining}\n"
+        except Exception:
+            pass
+
+        # Build "Check my bid" URL
+        check_bid_url = f"{url}/proposals" if url else ""
+        keyboard = None
+        if check_bid_url:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Check my bid", url=check_bid_url, api_kwargs={"style": 4})]  # cyan
+            ])
+
+        # Get original message in MarkdownV2 format and append bid result
+        from src.services.telegram.notifier import escape_markdown_v2
+        try:
+            original_md = query.message.text_markdown_v2
+            if not original_md:
+                original_md = escape_markdown_v2(query.message.text or "")
+
+            bid_result = (
+                f"\n\n{'─' * 30}\n"
+                f"✅ *BID PLACED\\!*\n"
+                f"💰 {bid_data['amount']:.0f} {escape_markdown_v2(currency)} · {bid_data['period']} days\n"
+                f"{escape_markdown_v2(remaining_text)}"
+            )
+
+            await query.edit_message_text(
+                text=original_md + bid_result,
+                parse_mode="MarkdownV2",
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            logger.error(f"Failed to update message with bid result: {e}")
+            try:
+                original_text = query.message.text or ""
+                bid_result = (
+                    f"\n\n{'─' * 30}\n"
+                    f"✅ BID PLACED!\n"
+                    f"💰 {bid_data['amount']:.0f} {currency} · {bid_data['period']} days\n"
+                    f"{remaining_text}"
+                )
+                await query.edit_message_text(
+                    text=original_text + bid_result,
+                    reply_markup=keyboard,
+                )
+            except Exception as e2:
+                logger.error(f"Fallback also failed: {e2}")
+                try:
+                    await query.edit_message_reply_markup(reply_markup=keyboard)
+                except:
+                    pass
+
+        # Schedule delayed update (1 min) with fresh bid count, avg, position
+        if result.bid_id:
+            import asyncio
+            from src.services.telegram.notifier import schedule_bid_update
+            asyncio.create_task(
+                schedule_bid_update(
+                    bot=context.bot,
+                    chat_id=query.message.chat_id,
+                    message_id=query.message.message_id,
+                    project_id=project_id,
+                    bid_id=result.bid_id,
+                    bidding_service=bidding_service,
+                    currency=currency,
+                )
+            )
+
         logger.info(f"Bid placed on project {project_id}: {bid_data['amount']} {currency}")
     else:
-        await query.edit_message_text(
-            f"❌ Bid failed\n\n"
-            f"Error: {result.message}"
+        # On failure, show error as alert
+        from src.services.telegram.notifier import escape_markdown_v2
+
+        # Keep edit buttons so user can try again
+        edit_amount_btn = InlineKeyboardButton(
+            "✏️ Edit Amount",
+            callback_data=f"edit_amount:{project_id}",
+            api_kwargs={"style": 5},  # blue
         )
+        edit_text_btn = InlineKeyboardButton(
+            "✏️ Edit Proposal",
+            callback_data=f"edit_text:{project_id}",
+            api_kwargs={"style": 5},  # blue
+        )
+        retry_btn = InlineKeyboardButton(
+            f"🔄 Retry Bid",
+            callback_data=f"bid:{project_id}",
+            api_kwargs={"style": 1},  # orange
+        )
+        keyboard = InlineKeyboardMarkup([
+            [edit_amount_btn, edit_text_btn],
+            [retry_btn]
+        ])
+
+        # Re-add to pending bids for retry (preserve all context)
+        repo.add_pending_bid(
+            project_id=project_id,
+            amount=bid_data["amount"],
+            period=bid_data["period"],
+            description=bid_data["description"],
+            title=bid_data["title"],
+            currency=currency,
+            url=url,
+            bid_count=bid_count,
+            summary=bid_data.get("summary"),
+            budget_min=bid_data.get("budget_min"),
+            budget_max=bid_data.get("budget_max"),
+            client_country=bid_data.get("client_country"),
+            avg_bid=bid_data.get("avg_bid"),
+        )
+
+        # Check for common errors and provide helpful messages
+        error_msg = result.message
+        help_text = "You can edit and retry\\."
+
+        if "used all" in error_msg.lower() or "all of your bids" in error_msg.lower():
+            help_text = (
+                "⚠️ You've used all your bids on Freelancer\\.\n"
+                "Purchase more or wait for your limit to reset\\."
+            )
+        elif "language" in error_msg.lower():
+            help_text = (
+                "⚠️ *Fix:* Go to Freelancer\\.com → Settings → Browse Projects → "
+                "Add the project's language \\(e\\.g\\. Spanish\\)\\.\n\n"
+                "Then retry the bid\\."
+            )
+
+        # Reply with error
+        try:
+            await query.message.reply_text(
+                f"❌ *Bid failed*\n\n"
+                f"Error: {escape_markdown_v2(error_msg)}\n\n"
+                f"{help_text}",
+                parse_mode="MarkdownV2",
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            logger.error(f"Failed to send error message: {e}")
+
         logger.error(f"Bid failed on project {project_id}: {result.message}")
+
+
+async def handle_emoji_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Extract custom emoji IDs from messages containing custom emoji."""
+    if not update.message or not update.message.entities:
+        return
+
+    custom_emojis = [
+        e for e in update.message.entities
+        if e.type == "custom_emoji"
+    ]
+
+    if not custom_emojis:
+        return
+
+    lines = []
+    for entity in custom_emojis:
+        emoji_char = update.message.text[entity.offset:entity.offset + entity.length]
+        lines.append(f"{emoji_char}  →  <code>{entity.custom_emoji_id}</code>")
+
+    await update.message.reply_text(
+        f"🔍 <b>Custom Emoji IDs</b>\n\n" + "\n".join(lines),
+        parse_mode="HTML",
+    )
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global error handler to catch exceptions."""
+    if isinstance(context.error, telegram_error.NetworkError):
+        logger.warning(f"Network error encountered: {context.error}")
+    else:
+        logger.error(msg="Exception while handling an update:", exc_info=context.error)
 
 
 def setup_handlers(application: Application):
     """Register all handlers with the application."""
     # Command handlers
     application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
-    application.add_handler(CommandHandler("setbudget", cmd_setbudget))
+    application.add_handler(CommandHandler("control", cmd_control))
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
     application.add_handler(CommandHandler("stats", cmd_stats))
+    application.add_handler(CommandHandler("bidstats", cmd_bid_stats))
+    application.add_handler(CommandHandler("settings", cmd_settings))
+
+    # Multi-user commands (used by /myprofile inline buttons)
+    application.add_handler(CommandHandler("setskills", cmd_setskills))
+    application.add_handler(CommandHandler("setkeywords", cmd_setkeywords))
+    application.add_handler(CommandHandler("setname", cmd_setname))
+    application.add_handler(CommandHandler("myprofile", cmd_myprofile))
+
+    # Legacy commands kept for backwards compatibility but hidden from menu
+    application.add_handler(CommandHandler("setbudget", cmd_setbudget))
+    application.add_handler(CommandHandler("setpoll", cmd_setpoll))
+    application.add_handler(CommandHandler("setverified", cmd_setverified))
+
+    # Profile settings callbacks
+    application.add_handler(CallbackQueryHandler(handle_profile_callback, pattern="^profile:"))
+
+    # Settings callbacks
+    application.add_handler(CallbackQueryHandler(handle_settings_callback, pattern="^settings:"))
+
+    # Control panel Start/Stop callbacks
+    application.add_handler(CallbackQueryHandler(handle_control_callback, pattern="^control:"))
 
     # Conversation handler for editing amount
     edit_amount_handler = ConversationHandler(
@@ -537,10 +1605,16 @@ def setup_handlers(application: Application):
     application.add_handler(edit_amount_handler)
     application.add_handler(edit_text_handler)
 
-    # Callback handler for control panel buttons
-    application.add_handler(CallbackQueryHandler(handle_control_callback, pattern="^control:"))
+    # Callback handler for "Ask for Bid" button (on skipped projects)
+    application.add_handler(CallbackQueryHandler(handle_ask_bid_callback, pattern="^ask_bid:"))
 
     # Callback handler for Bid button
     application.add_handler(CallbackQueryHandler(handle_bid_callback, pattern="^bid:"))
+
+    # Custom emoji ID extractor (must be last — catches all text messages with entities)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_emoji_extract))
+
+    # Global error handler
+    application.add_error_handler(error_handler)
 
     logger.info("Telegram handlers registered")

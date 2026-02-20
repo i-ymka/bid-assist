@@ -40,6 +40,20 @@ class TelegramBot:
         # Register command handlers
         setup_handlers(self._application)
 
+        # Set bot commands for the UI
+        async def post_init(application: Application):
+            await application.bot.set_my_commands([
+                ("start", "▶️ Start the bot"),
+                ("help", "📚 Show help"),
+                ("status", "📊 Show bot status"),
+                ("control", "🎛️ Control panel"),
+                ("settings", "⚙️ Bot settings"),
+                ("myprofile", "👤 Your profile settings"),
+                ("stats", "📈 Show bid statistics"),
+                ("bidstats", "🏆 Show bid win/loss stats"),
+            ])
+        self._application.post_init = post_init
+
         return self._application
 
     @property

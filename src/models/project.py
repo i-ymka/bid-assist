@@ -1,7 +1,8 @@
 """Project data models."""
 
+from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ProjectBudget(BaseModel):
@@ -10,11 +11,17 @@ class ProjectBudget(BaseModel):
     minimum: float = 0
     maximum: float = 0
 
+    @field_validator("minimum", "maximum", mode="before")
+    @classmethod
+    def convert_none_to_zero(cls, v):
+        """Convert None to 0 for budget fields."""
+        return v if v is not None else 0
+
 
 class ProjectOwner(BaseModel):
     """Project owner information."""
 
-    id: int
+    id: int = 0
     username: str = "N/A"
     country: str = "Unknown"
 
@@ -52,12 +59,16 @@ class Project(BaseModel):
     jobs: List[ProjectSkill] = Field(default_factory=list)
     status: str = ""
     type: str = ""
+    winner_id: Optional[int] = None
 
     # New fields
     bid_stats: BidStats = Field(default_factory=BidStats)
-    hireme: bool = False  # True = preferred freelancer only
+    hireme: bool = False  # True = "hire me" project
+    upgrades: dict = Field(default_factory=dict)  # Project upgrades (pf_only, featured, etc.)
     nda_required: bool = False
     nda_details: Optional[str] = None
+    time_submitted: Optional[datetime] = None
+    language: str = "en"  # Project language code (e.g., "en", "es", "de")
 
     @property
     def skill_ids(self) -> set:
@@ -84,7 +95,25 @@ class Project(BaseModel):
     @property
     def is_preferred_only(self) -> bool:
         """Check if project is for preferred freelancers only."""
-        return self.hireme
+        return (
+            self.hireme
+            or self.upgrades.get("pf_only", False)
+            or self.upgrades.get("preferred", False)
+        )
+
+    def is_older_than_hours(self, hours: float) -> bool:
+        """Check if project is older than specified hours.
+
+        Args:
+            hours: Maximum age in hours.
+
+        Returns:
+            True if project is older than specified hours.
+        """
+        if not self.time_submitted:
+            return False  # If no timestamp, don't filter it out
+        age = datetime.utcnow() - self.time_submitted
+        return age.total_seconds() > hours * 3600
 
     @classmethod
     def from_api_response(cls, data: dict, users: dict = None) -> "Project":
@@ -95,16 +124,24 @@ class Project(BaseModel):
             users: Optional dict of users keyed by user ID (for owner details)
         """
         # Get owner info
-        owner_id = data.get("owner_id", 0)
+        owner_id = data.get("owner_id") or 0
         owner_data = {"id": owner_id, "username": "N/A", "country": "Unknown"}
 
         if data.get("owner"):
-            owner_data["id"] = data["owner"].get("id", owner_id)
-            owner_data["username"] = data["owner"].get("username", "N/A")
+            owner_obj = data["owner"]
+            owner_data["id"] = owner_obj.get("id") or owner_id or 0
+            owner_data["username"] = owner_obj.get("username", "N/A")
+            # Check if location is directly on owner object
+            location = owner_obj.get("location", {})
+            if location:
+                country = location.get("country", {})
+                if country:
+                    owner_data["country"] = country.get("name", "Unknown") or "Unknown"
 
-        # Get country from users dict if available
-        if users and str(owner_id) in users:
-            user = users[str(owner_id)]
+        # Get country from users dict if available (overwrites if found)
+        # API may key by string or int
+        user = users.get(str(owner_id)) or users.get(owner_id) if users else None
+        if user:
             owner_data["username"] = user.get("username", owner_data["username"])
             location = user.get("location", {})
             if location:
@@ -123,6 +160,18 @@ class Project(BaseModel):
         nda_details = data.get("nda_details")
         nda_required = nda_details is not None and nda_details != {}
 
+        # Parse time_submitted (Unix timestamp from API)
+        time_submitted = None
+        ts = data.get("time_submitted")
+        if ts:
+            try:
+                time_submitted = datetime.utcfromtimestamp(ts)
+            except (ValueError, TypeError):
+                pass
+
+        # Parse language (Freelancer API returns "language" as a code like "en")
+        language = data.get("language") or "en"
+
         return cls(
             id=data.get("id", 0),
             title=data.get("title") or "",
@@ -133,8 +182,12 @@ class Project(BaseModel):
             jobs=[ProjectSkill(**job) for job in (data.get("jobs") or [])],
             status=data.get("status") or "",
             type=data.get("type") or "",
+            winner_id=data.get("winner_id"),
             bid_stats=bid_stats,
             hireme=data.get("hireme") or False,
+            upgrades=data.get("upgrades") or {},
             nda_required=nda_required,
             nda_details=str(nda_details) if nda_details else None,
+            time_submitted=time_submitted,
+            language=language,
         )
