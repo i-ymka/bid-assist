@@ -144,10 +144,8 @@ def rebuild_bid_message(bid_data: dict) -> str:
     # Country and bids info
     if client_country:
         lines.append(f"{ce('country')} *Country:* {escape_markdown_v2(client_country)}\n")
-    lines.append(f"{ce('stats')} *Bids:* {bid_count}")
-    if avg_bid:
-        lines.append(f" \\(avg: ${avg_bid:.0f}\\)")
-    lines.append("\n")
+    avg_bid_str = escape_markdown_v2(f"{avg_bid:.0f} {currency}") if avg_bid else "N/A"
+    lines.append(f"{ce('bids')} Bids: {bid_count} \\(avg: {avg_bid_str}\\)\n")
 
     # Summary
     if summary:
@@ -610,6 +608,7 @@ class Notifier:
         amount: float,
         period: int,
         bid_id: int = None,
+        rank_info: dict = None,
         remaining_bids: int = None,
     ) -> Optional[Message]:
         """Send auto-bid success notification. Returns Message for delayed updates."""
@@ -621,8 +620,6 @@ class Notifier:
         else:
             budget_str = "Not specified"
 
-        avg_bid_str = f"{avg_bid:.0f} {currency}" if avg_bid else "N/A"
-
         title_escaped = escape_markdown_v2(title)
         summary_escaped = escape_markdown_v2(summary)
         bid_text_clean = strip_markdown(bid_text)
@@ -630,15 +627,28 @@ class Notifier:
         budget_escaped = escape_markdown_v2(budget_str)
         url_escaped = escape_markdown_v2(url)
         country_escaped = escape_markdown_v2(client_country or "Unknown")
-        avg_bid_escaped = escape_markdown_v2(avg_bid_str)
         amount_escaped = escape_markdown_v2(f"{amount:.0f} {currency}")
+
+        # Build bids line: show rank if available, otherwise initial stats
+        if rank_info:
+            rank = rank_info.get("rank")
+            total = rank_info.get("total_bids", bid_count)
+            avg = rank_info.get("avg_bid", avg_bid)
+            avg_str = escape_markdown_v2(f"{avg:.0f} {currency}") if avg else "N/A"
+            if rank:
+                bids_line = f"  {ce('bids')} My bid: \\#{rank} out of {total} \\(avg: {avg_str}\\)\n"
+            else:
+                bids_line = f"  {ce('bids')} Bids: {total} \\(avg: {avg_str}\\)\n"
+        else:
+            avg_str = escape_markdown_v2(f"{avg_bid:.0f} {currency}") if avg_bid else "N/A"
+            bids_line = f"  {ce('bids')} Bids: {bid_count} \\(avg: {avg_str}\\)\n"
 
         lines = [
             f"*{title_escaped}*\n",
             f"\n{ce('summary')} *Summary:* {summary_escaped}\n",
             f"\n{ce('stats')} *Project Info:*\n",
             f"  {ce('budget')} Budget: {budget_escaped}\n",
-            f"  {ce('bids')} Bids: {bid_count} \\(avg: {avg_bid_escaped}\\)\n",
+            bids_line,
             f"  {ce('country')} Client: {country_escaped}\n",
             f"\n{ce('link')} *Link:* {url_escaped}\n",
             f"\n{ce('proposal')} *Bid Proposal:*\n```\n{bid_text_escaped}\n```\n",
@@ -649,7 +659,7 @@ class Notifier:
         lines.append(f"{random_header_emoji()} *AUTO\\-BID PLACED\\!*\n")
         lines.append(f"{ce('check')} {amount_escaped} · {period} days\n")
         if remaining_bids is not None:
-            lines.append(f"🎟️ Remaining: {remaining_bids}\n")
+            lines.append(f"🎟️ {remaining_bids} bids remaining\n")
         lines.append(f"\n\\#AUTOBID")
 
         text = "".join(lines)
@@ -730,6 +740,43 @@ class Notifier:
             return None
 
 
+def replace_bids_line(text: str, rank=None, total=None, avg=None, currency="USD") -> str:
+    """Replace the bids info line in message text with updated stats.
+
+    Finds the line containing the bids emoji + "Bids:" or "My bid:" and
+    replaces it with updated rank/total/avg info.
+
+    Returns:
+        Updated text, or original text if bids line not found.
+    """
+    bids_emoji = ce('bids')
+    if not bids_emoji:
+        return text
+
+    # Build new content
+    if rank and total:
+        new_content = f"My bid: \\#{rank} out of {total}"
+    elif total:
+        new_content = f"Bids: {total}"
+    else:
+        return text
+
+    if avg:
+        avg_escaped = escape_markdown_v2(f"{avg:.0f} {currency}")
+        new_content += f" \\(avg: {avg_escaped}\\)"
+
+    # Find and replace the bids line
+    lines = text.split('\n')
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith(bids_emoji) and ('Bids:' in stripped or 'My bid:' in stripped):
+            indent = line[:len(line) - len(stripped)]
+            lines[i] = f"{indent}{bids_emoji} {new_content}"
+            break
+
+    return '\n'.join(lines)
+
+
 async def schedule_bid_update(
     bot: Bot,
     chat_id,
@@ -742,54 +789,41 @@ async def schedule_bid_update(
     original_keyboard: InlineKeyboardMarkup = None,
     delay: int = 60,
 ):
-    """Fetch updated bid stats after a delay and edit the original message.
+    """Fetch updated bid stats after a delay and edit the bids line in-place.
 
     Runs as a background task (asyncio.create_task). After `delay` seconds,
-    fetches fresh bid count, average, position, and remaining bids,
-    then appends stats to the original message via edit.
+    fetches fresh bid count, average, and position, then updates the existing
+    bids line in the original message.
     """
     try:
         await asyncio.sleep(delay)
 
         rank_info = bidding_service.get_bid_rank(bid_id, project_id, retry_delay=0)
-        remaining = bidding_service.get_remaining_bids()
 
-        parts = []
-        if rank_info:
+        if rank_info and original_text:
             total = rank_info.get("total_bids")
             rank = rank_info.get("rank")
             avg = rank_info.get("avg_bid")
-            if total:
-                parts.append(f"{total} bids")
-            if avg:
-                parts.append(f"avg {avg:.0f} {currency}")
-            if rank:
-                parts.append(f"your bid \\#{rank}")
-        if remaining is not None:
-            parts.append(f"{remaining} remaining")
 
-        if parts and original_text:
-            stats_line = f"\n{ce('stats')} {' · '.join(parts)}"
-            # Insert stats before the #AUTOBID/#BID tag
-            if "\\#AUTOBID" in original_text:
-                updated_text = original_text.replace("\\#AUTOBID", f"{stats_line}\n\n\\#AUTOBID")
-            elif "\\#BID" in original_text:
-                updated_text = original_text.replace("\\#BID", f"{stats_line}\n\n\\#BID")
+            updated_text = replace_bids_line(
+                original_text, rank=rank, total=total, avg=avg, currency=currency,
+            )
+
+            if updated_text != original_text:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=updated_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=original_keyboard,
+                        disable_web_page_preview=True,
+                    )
+                    logger.info(f"Bids line updated for {project_id}: #{rank} out of {total} (avg: {avg:.0f})")
+                except Exception as edit_err:
+                    logger.error(f"Failed to edit message for {project_id}: {edit_err}")
             else:
-                updated_text = original_text + stats_line
-
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=updated_text,
-                    parse_mode="MarkdownV2",
-                    reply_markup=original_keyboard,
-                    disable_web_page_preview=True,
-                )
-                logger.info(f"Bid update edited into message for {project_id}: {' · '.join(parts)}")
-            except Exception as edit_err:
-                logger.error(f"Failed to edit message for {project_id}: {edit_err}")
+                logger.debug(f"Bids line unchanged for {project_id}")
         else:
             logger.debug(f"No updated stats for project {project_id}")
 

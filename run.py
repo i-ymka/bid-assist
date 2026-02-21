@@ -346,12 +346,23 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                         avg_bid=project_data.get("avg_bid", 0),
                     )
 
-                    # Check remaining bids
+                    # Get rank info and remaining bids right after placing bid
+                    rank_info = None
                     remaining_bids = None
-                    try:
-                        remaining_bids = bidding_service.get_remaining_bids()
-                    except Exception:
-                        pass
+                    if bid_result.success and bid_result.bid_id:
+                        try:
+                            rank_info = await asyncio.get_event_loop().run_in_executor(
+                                None, bidding_service.get_bid_rank,
+                                bid_result.bid_id, project_id, 1.0,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            remaining_bids = await asyncio.get_event_loop().run_in_executor(
+                                None, bidding_service.get_remaining_bids,
+                            )
+                        except Exception:
+                            pass
 
                     # Send auto-bid result notification
                     notif_sent = False
@@ -375,6 +386,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                                 amount=result.amount,
                                 period=result.period,
                                 bid_id=bid_result.bid_id,
+                                rank_info=rank_info,
                                 remaining_bids=remaining_bids,
                             )
                             if msg:

@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     # API Keys & Tokens
     freelancer_oauth_token: str = Field(..., alias="FREELANCER_OAUTH_TOKEN")
+    freelancer_auth_v2: str = Field("", alias="FREELANCER_AUTH_V2")
     telegram_bot_token: str = Field(..., alias="TELEGRAM_BOT_TOKEN")
     gemini_api_key: str = Field("", alias="GEMINI_API_KEY")
 

@@ -123,52 +123,41 @@ class FreelancerClient:
         return self._user_id
 
     def get_remaining_bids(self) -> Optional[int]:
-        """Get remaining bid count for the authenticated user.
+        """Get remaining bid count via Freelancer internal API.
 
-        Uses bid_limit from membership and counts recent bids from API.
-        Freelancer's bidding works on a rolling refresh: bid_refresh_rate bids/day,
-        max accumulation = bid_limit.
+        Uses the getBidLimit.php endpoint which requires the session-based
+        freelancer-auth-v2 token (set FREELANCER_AUTH_V2 in .env).
 
         Returns:
             Number of remaining bids, or None if unavailable.
         """
         try:
-            import time
-
-            # Get membership info (bid_limit, bid_refresh_rate)
-            response = self.get(USERS_SELF_ENDPOINT, params={
-                "membership_details": "true",
-            })
-            result = response.get("result", {})
-            membership = result.get("membership_package", {})
-            bid_limit = membership.get("bid_limit")
-            if bid_limit is None:
-                logger.warning("bid_limit not found in membership_package")
+            auth_v2 = settings.freelancer_auth_v2
+            if not auth_v2:
                 return None
 
-            # Count bids placed in current billing period (last 30 days)
-            user_id = result.get("id") or self.get_user_id()
-            from_time = int(time.time()) - 30 * 24 * 3600
-            bids_resp = self.get("/projects/0.1/bids/", params={
-                "bidders[]": user_id,
-                "limit": 250,
-                "offset": 0,
-                "from_time": from_time,
-            })
-            bids = bids_resp.get("result", {}).get("bids", [])
+            user_id = self.get_user_id()
+            response = requests.get(
+                "https://www.freelancer.com/ajax-api/projects/getBidLimit.php",
+                params={"userId": user_id, "compact": "true"},
+                headers={
+                    "freelancer-auth-v2": auth_v2,
+                    "Accept": "application/json",
+                },
+                timeout=10,
+            )
 
-            # Filter to only bids within the period
-            now = time.time()
-            recent_bids = [b for b in bids if b.get("time_submitted", 0) > now - 30 * 24 * 3600]
-            used = len(recent_bids)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success":
+                    result = data.get("result", {})
+                    remaining = result.get("bidsRemaining")
+                    limit = result.get("bidLimit")
+                    logger.info(f"Bids remaining: {remaining} / {limit}")
+                    return remaining
 
-            # Account for refresh: ~bid_refresh_rate bids restored per day
-            refresh_rate = membership.get("bid_refresh_rate", 0)
-            # Simple estimate: remaining = limit - used + refreshed_today (capped at limit)
-            remaining = max(0, bid_limit - used)
-
-            logger.info(f"Bids: {used} used / {bid_limit} limit = {remaining} remaining (refresh: {refresh_rate:.1f}/day)")
-            return remaining
+            logger.warning(f"getBidLimit failed: {response.status_code}")
+            return None
 
         except Exception as e:
             logger.error(f"Failed to get remaining bids: {e}")

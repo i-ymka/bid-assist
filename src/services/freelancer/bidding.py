@@ -102,10 +102,12 @@ class BiddingService:
             response = self._client.post(BIDS_ENDPOINT, data=payload)
 
             if response.get("status") == "success":
-                bid_id = response.get("result", {}).get("id")
+                result_data = response.get("result", {})
+                bid_id = result_data.get("id")
+                # Log full response to find remaining bids field
                 logger.info(
                     f"Bid placed successfully on project {bid.project_id}, "
-                    f"bid ID: {bid_id}"
+                    f"bid ID: {bid_id}, response keys: {list(result_data.keys())}"
                 )
                 return BidResult(
                     success=True,

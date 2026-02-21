@@ -1342,14 +1342,18 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Update message with result
     if result.success:
-        # Check remaining bids
-        remaining_text = ""
-        try:
-            remaining = bidding_service.get_remaining_bids()
-            if remaining is not None:
-                remaining_text = f"🎟️ Remaining: {remaining}\n"
-        except Exception:
-            pass
+        # Get rank info and remaining bids immediately after placing bid
+        rank_info = None
+        remaining_bids = None
+        if result.bid_id:
+            try:
+                rank_info = bidding_service.get_bid_rank(result.bid_id, project_id, retry_delay=1.0)
+            except Exception:
+                pass
+            try:
+                remaining_bids = bidding_service.get_remaining_bids()
+            except Exception:
+                pass
 
         # Build "Check my bid" URL
         check_bid_url = f"{url}/proposals" if url else ""
@@ -1360,21 +1364,32 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             ])
 
         # Get original message in MarkdownV2 format and append bid result
-        from src.services.telegram.notifier import escape_markdown_v2
+        from src.services.telegram.notifier import escape_markdown_v2, replace_bids_line
         try:
             original_md = query.message.text_markdown_v2
             if not original_md:
                 original_md = escape_markdown_v2(query.message.text or "")
 
-            bid_result = (
+            # Update bids line in-place with rank info
+            if rank_info:
+                original_md = replace_bids_line(
+                    original_md,
+                    rank=rank_info.get("rank"),
+                    total=rank_info.get("total_bids"),
+                    avg=rank_info.get("avg_bid"),
+                    currency=currency,
+                )
+
+            bid_result_text = (
                 f"\n\n{'─' * 30}\n"
                 f"{random_header_emoji()} *BID PLACED\\!*\n"
                 f"{ce('check')} {bid_data['amount']:.0f} {escape_markdown_v2(currency)} · {bid_data['period']} days\n"
-                f"{escape_markdown_v2(remaining_text)}"
             )
+            if remaining_bids is not None:
+                bid_result_text += f"🎟️ {remaining_bids} bids remaining\n"
 
             await query.edit_message_text(
-                text=original_md + bid_result,
+                text=original_md + bid_result_text,
                 parse_mode="MarkdownV2",
                 reply_markup=keyboard,
                 disable_web_page_preview=True,
@@ -1383,14 +1398,13 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error(f"Failed to update message with bid result: {e}")
             try:
                 original_text = query.message.text or ""
-                bid_result = (
+                bid_result_text = (
                     f"\n\n{'─' * 30}\n"
                     f"BID PLACED!\n"
                     f"{bid_data['amount']:.0f} {currency} · {bid_data['period']} days\n"
-                    f"{remaining_text}"
                 )
                 await query.edit_message_text(
-                    text=original_text + bid_result,
+                    text=original_text + bid_result_text,
                     reply_markup=keyboard,
                     disable_web_page_preview=True,
                 )
@@ -1405,9 +1419,8 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         if result.bid_id:
             import asyncio
             from src.services.telegram.notifier import schedule_bid_update
-            # Get the current message text after our edit for later re-editing
             try:
-                edited_text = original_md + bid_result
+                edited_text = original_md + bid_result_text
             except Exception:
                 edited_text = None
             asyncio.create_task(
