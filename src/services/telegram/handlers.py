@@ -422,7 +422,6 @@ async def cmd_bid_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Reviewed: {len(recent_bids)}\n"
         f"✅ Won: {win_count}\n"
         f"❌ Lost: {loss_count}\n"
-        f"⚪ Other: {other_count}\n"
         f"⚪ Other: {other_count}"
     )
     await update.message.reply_text(summary_message, parse_mode="HTML")
@@ -866,7 +865,9 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
     import asyncio
     from src.services.ai.gemini_analyzer import force_bid_analysis
 
-    # Format budget string
+    # Format budget string (convert to USD for AI)
+    from src.services.currency import to_usd, from_usd, round_up_10
+
     budget_min = project_data.get("budget_min", 0)
     budget_max = project_data.get("budget_max", 0)
     currency = project_data.get("currency", "USD")
@@ -874,10 +875,14 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
     bid_count = project_data.get("bid_count", 0)
     avg_bid = project_data.get("avg_bid", 0)
 
-    if budget_min and budget_max:
-        budget_str = f"${budget_min:.0f} - ${budget_max:.0f} {currency}"
-    elif budget_max:
-        budget_str = f"up to ${budget_max:.0f} {currency}"
+    budget_min_usd = to_usd(budget_min, currency) if budget_min else 0
+    budget_max_usd = to_usd(budget_max, currency) if budget_max else 0
+    avg_bid_usd = to_usd(avg_bid, currency) if avg_bid else 0
+
+    if budget_min_usd and budget_max_usd:
+        budget_str = f"{budget_min_usd:.0f} - {budget_max_usd:.0f} USD"
+    elif budget_max_usd:
+        budget_str = f"up to {budget_max_usd:.0f} USD"
     else:
         budget_str = "Not specified"
 
@@ -890,7 +895,7 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
         project_data["title"],
         project_data["description"],
         budget_str,
-        avg_bid,
+        avg_bid_usd,
         bid_count,
     )
 
@@ -902,6 +907,11 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
             disable_web_page_preview=True,
         )
         return
+
+    # Convert AI's USD amount back to project currency
+    if currency != "USD" and result.amount > 0:
+        result.amount = round_up_10(from_usd(result.amount, currency))
+        logger.info(f"Force bid amount converted to {result.amount} {currency}")
 
     # Store as pending bid (with all context for later edits/retry)
     repo.add_pending_bid(

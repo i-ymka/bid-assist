@@ -79,6 +79,7 @@ Specific Risk Logic:
 
 ### Step 3: Budget & Time Evaluation
 Goal: ~50 USD per full working day (8h).
+IMPORTANT: All numbers you receive (BUDGET, AVERAGE BID) are already converted to USD. Output your AMOUNT in USD too. Do NOT convert currencies yourself — this is handled automatically.
 
 1.  Estimate Time (PERIOD):
     - Estimate how many full days (8h) the task actually needs based on technical complexity.
@@ -95,6 +96,7 @@ Goal: ~50 USD per full working day (8h).
         - If Client Budget is absurdly low (e.g., $10 for 3 days): SKIP.
     - If no explicit budget, look at "Avg Bid" and bid competitively (close to avg, but never below Our Minimum).
     - Hourly Projects: If the project is hourly, calculate the total estimated cost. In the AMOUNT field, output ONLY the fixed total number (e.g. 150).
+    - Output AMOUNT as a plain number in USD. Currency conversion is done externally.
 
 4.  Hosting Upsell: If it's a web app/bot, internally note if we can offer hosting ($5/mo) in the SUMMARY.
 
