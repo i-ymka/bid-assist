@@ -1038,6 +1038,33 @@ class ProjectRepository:
             logger.error(f"Failed to set auto_bid state: {e}")
             return False
 
+    def get_receive_skipped(self) -> bool:
+        """Check if skip notifications are enabled (global setting)."""
+        try:
+            result = self._conn.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'receive_skipped'"
+            ).fetchone()
+            return result[0] != "false" if result else True  # Default: on
+        except sqlite3.Error:
+            return True
+
+    def set_receive_skipped(self, enabled: bool) -> bool:
+        """Set whether to receive skip notifications."""
+        try:
+            with self._conn:
+                self._conn.execute(
+                    """
+                    INSERT OR REPLACE INTO runtime_settings (key, value, updated_at)
+                    VALUES ('receive_skipped', ?, CURRENT_TIMESTAMP)
+                    """,
+                    ("true" if enabled else "false",),
+                )
+            logger.info(f"Receive skipped set to {enabled}")
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to set receive_skipped: {e}")
+            return False
+
     # ===== User Settings Methods (multi-user support) =====
 
     def get_user(self, chat_id: str) -> Optional[dict]:

@@ -75,9 +75,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *Settings*
 /settings — Bot settings (budget, poll, auto-bid, filters)
 
-*Your Profile*
-/myprofile — Your profile (skills, keywords, name)
-
 *During Bid Edit*
 /cancel — Cancel current edit
 """
@@ -315,9 +312,7 @@ async def cmd_bid_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = FreelancerClient()
     my_user_id = client.get_user_id()
     
-    # Get user's preference for this command
-    user_settings = repo.get_user(str(update.effective_chat.id))
-    show_details = user_settings.get('show_bidstats_details', True)
+    show_details = True  # Always show details
 
     recent_bids = repo.get_recent_bids(limit=25)
 
@@ -428,254 +423,9 @@ async def cmd_bid_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Won: {win_count}\n"
         f"❌ Lost: {loss_count}\n"
         f"⚪ Other: {other_count}\n"
-        f"<i>(Use /myprofile to toggle 'Other' projects list)</i>"
+        f"⚪ Other: {other_count}"
     )
     await update.message.reply_text(summary_message, parse_mode="HTML")
-
-
-async def cmd_setskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /setskills command - set personal skill IDs for filtering.
-
-    Usage: /setskills 13,14,29,36 (skill IDs from Freelancer URL)
-           /setskills default (use global settings)
-           /setskills (show current)
-    """
-    repo = ProjectRepository()
-    chat_id = str(update.effective_chat.id)
-    user = repo.get_user(chat_id)
-
-    if not user:
-        await update.message.reply_text(
-            "❌ You are not registered. Contact admin to add you."
-        )
-        return
-
-    args = context.args
-
-    if not args:
-        # Show current skills
-        current = user.get("skill_ids", "") or "default (global)"
-        await update.message.reply_text(
-            f"🔧 *Your Skill IDs:* {current}\n\n"
-            f"*Usage:*\n"
-            f"`/setskills 13,14,29,36` \\- set specific skills\n"
-            f"`/setskills default` \\- use global skills\n\n"
-            f"*How to get skill IDs:*\n"
-            f"1\\. Go to freelancer\\.com/search/projects\n"
-            f"2\\. Select skills you want\n"
-            f"3\\. Copy numbers from URL: `?projectSkills=13,14,29`",
-            parse_mode="MarkdownV2"
-        )
-        return
-
-    skill_ids_str = " ".join(args).replace(" ", "")
-
-    if skill_ids_str.lower() == "default":
-        skill_ids_str = ""
-
-    # Validate: should be comma-separated numbers
-    if skill_ids_str:
-        parts = skill_ids_str.split(",")
-        valid = all(p.strip().isdigit() for p in parts if p.strip())
-        if not valid:
-            await update.message.reply_text(
-                "❌ Invalid format. Use comma-separated numbers.\n"
-                "Example: /setskills 13,14,29,36"
-            )
-            return
-
-    repo.update_user_skills(chat_id, skill_ids_str)
-
-    if skill_ids_str:
-        await update.message.reply_text(
-            f"✅ Skill IDs updated: {skill_ids_str}"
-        )
-    else:
-        await update.message.reply_text(
-            "✅ Using default (global) skill IDs"
-        )
-
-
-async def cmd_setkeywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /setkeywords command - set keywords for project matching.
-
-    Usage: /setkeywords fivem,gta,lua (only get matching projects)
-           /setkeywords (clear = get ALL projects)
-    """
-    repo = ProjectRepository()
-    chat_id = str(update.effective_chat.id)
-    user = repo.get_user(chat_id)
-
-    if not user:
-        await update.message.reply_text(
-            "❌ You are not registered. Contact admin to add you."
-        )
-        return
-
-    args = context.args
-
-    if not args:
-        # Clear keywords = get all projects
-        current = user.get("keywords", "")
-        if current:
-            # Show current keywords
-            await update.message.reply_text(
-                f"🔑 *Your Keywords:* {current}\n\n"
-                f"Keywords are matched against: title, description, skill tags\n\n"
-                f"*Usage:*\n"
-                f"`/setkeywords fivem,gta,lua` \\- only matching projects\n"
-                f"`/setkeywords clear` \\- receive ALL projects",
-                parse_mode="MarkdownV2"
-            )
-        else:
-            await update.message.reply_text(
-                f"🔑 *Your Keywords:* \\(none \\- receiving ALL projects\\)\n\n"
-                f"*Usage:*\n"
-                f"`/setkeywords fivem,gta,lua` \\- only matching projects",
-                parse_mode="MarkdownV2"
-            )
-        return
-
-    keywords_str = " ".join(args).lower()
-
-    if keywords_str == "clear":
-        keywords_str = ""
-
-    repo.update_user_keywords(chat_id, keywords_str)
-
-    if keywords_str:
-        await update.message.reply_text(
-            f"✅ Keywords updated: {keywords_str}\n\n"
-            f"You'll only receive projects matching these keywords."
-        )
-    else:
-        await update.message.reply_text(
-            "✅ Keywords cleared. You'll receive ALL projects."
-        )
-
-
-def _get_profile_keyboard(user_settings: dict) -> InlineKeyboardMarkup:
-    """Create the keyboard for the profile message."""
-    skip_status = "🔕 Off" if user_settings.get('receive_skipped') else "✅ On"
-    stats_status = "Compact" if user_settings.get('show_bidstats_details') else "Full"
-    
-    keyboard = [
-        [
-            InlineKeyboardButton(f"Skipped Projects: {skip_status}", callback_data="profile:toggle_skip"),
-        ],
-        [
-            InlineKeyboardButton(f"/bidstats Mode: {stats_status}", callback_data="profile:toggle_stats"),
-        ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-async def cmd_myprofile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /myprofile command - show current user settings."""
-    repo = ProjectRepository()
-    chat_id = str(update.effective_chat.id)
-    user = repo.get_user(chat_id)
-
-    if not user:
-        await update.message.reply_text(
-            "❌ You are not registered. Contact admin to add you."
-        )
-        return
-
-    name = user.get("name", "Unknown")
-    skills = user.get("skill_ids", "") or "default (global)"
-    keywords = user.get("keywords", "") or "(none - ALL projects)"
-    is_active = "✅ Active" if user.get("is_active", 1) else "❌ Inactive"
-    
-    # These settings are now in the keyboard
-    # receive_skipped = "✅ On" if user.get("receive_skipped", 1) else "🔕 Off"
-    # show_bidstats = "Full" if user.get("show_bidstats_details", 1) else "Compact"
-
-    message = (
-        f"👤 <b>Your Profile</b>\n\n"
-        f"<b>Name:</b> {name}\n"
-        f"<b>Status:</b> {is_active}\n"
-        f"<b>Skill IDs:</b> {skills}\n"
-        f"<b>Keywords:</b> {keywords}\n\n"
-        f"Use the buttons below to toggle notification settings."
-    )
-
-    keyboard = _get_profile_keyboard(user)
-    await update.message.reply_text(message, parse_mode="HTML", reply_markup=keyboard)
-
-
-async def cmd_setname(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /setname command - set display name.
-
-    Usage: /setname Ymka
-    """
-    repo = ProjectRepository()
-    chat_id = str(update.effective_chat.id)
-    user = repo.get_user(chat_id)
-
-    if not user:
-        await update.message.reply_text(
-            "❌ You are not registered. Contact admin to add you."
-        )
-        return
-
-    args = context.args
-
-    if not args:
-        current = user.get("name", "Unknown")
-        await update.message.reply_text(
-            f"👤 Your current name: {current}\n\n"
-            f"Usage: /setname <name>\n"
-            f"Example: /setname Ymka"
-        )
-        return
-
-    new_name = " ".join(args)
-
-    try:
-        with repo._conn:
-            repo._conn.execute(
-                "UPDATE user_settings SET name = ? WHERE chat_id = ?",
-                (new_name, chat_id),
-            )
-        await update.message.reply_text(f"✅ Name updated to: {new_name}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Failed to update name: {e}")
-
-
-async def handle_profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle callbacks from the /myprofile keyboard."""
-    query = update.callback_query
-    await query.answer()
-
-    repo = ProjectRepository()
-    chat_id = str(query.effective_chat.id)
-    
-    action = query.data.split(":")[1]
-
-    if action == "toggle_skip":
-        repo.toggle_receive_skipped(chat_id)
-    elif action == "toggle_stats":
-        repo.toggle_show_bidstats_details(chat_id)
-
-    # Refresh the profile message
-    user = repo.get_user(chat_id)
-    name = user.get("name", "Unknown")
-    skills = user.get("skill_ids", "") or "default (global)"
-    keywords = user.get("keywords", "") or "(none - ALL projects)"
-    is_active = "✅ Active" if user.get("is_active", 1) else "❌ Inactive"
-    
-    message = (
-        f"👤 <b>Your Profile</b>\n\n"
-        f"<b>Name:</b> {name}\n"
-        f"<b>Status:</b> {is_active}\n"
-        f"<b>Skill IDs:</b> {skills}\n"
-        f"<b>Keywords:</b> {keywords}\n\n"
-        f"Use the buttons below to toggle notification settings."
-    )
-
-    keyboard = _get_profile_keyboard(user)
-    await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
 
 
 def _build_settings_message(repo: ProjectRepository) -> str:
@@ -685,10 +435,12 @@ def _build_settings_message(repo: ProjectRepository) -> str:
     verified_status = "✅ Verified" if repo.is_verified() else "❌ Not verified"
     skip_preferred_status = "✅ On" if repo.skip_preferred_only() else "🔕 Off"
     auto_bid_status = "🟢 On" if repo.is_auto_bid() else "🔴 Off"
+    skip_notif_status = "✅ On" if repo.get_receive_skipped() else "🔕 Off"
 
     verified_hint = "(crypto projects)" if verified_status == "❌ Not verified" else "(all projects)"
     skip_hint = "(skip)" if skip_preferred_status == "✅ On" else "(show)"
     auto_bid_hint = "(bids placed automatically)" if repo.is_auto_bid() else "(manual confirmation)"
+    skip_notif_hint = "(receive)" if repo.get_receive_skipped() else "(muted)"
 
     return (
         f"⚙️ <b>Bot Settings</b>\n\n"
@@ -701,6 +453,8 @@ def _build_settings_message(repo: ProjectRepository) -> str:
         f"• Blocked currencies: {', '.join(settings.blocked_currencies) if settings.blocked_currencies else 'none'}\n\n"
         f"<b>Bidding:</b>\n"
         f"• Auto-bid: {auto_bid_status} {auto_bid_hint}\n\n"
+        f"<b>Notifications:</b>\n"
+        f"• Skip notifications: {skip_notif_status} {skip_notif_hint}\n\n"
         f"<i>Use the buttons below to change settings</i>"
     )
 
@@ -710,6 +464,7 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
     verified_status = "✅ On" if repo.is_verified() else "🔕 Off"
     skip_preferred_status = "✅ On" if repo.skip_preferred_only() else "🔕 Off"
     auto_bid_status = "🟢 On" if repo.is_auto_bid() else "🔴 Off"
+    skip_notif_status = "✅ On" if repo.get_receive_skipped() else "🔕 Off"
     state = get_runtime_state()
 
     keyboard = [
@@ -729,7 +484,7 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"Auto-Bid: {auto_bid_status}", callback_data="settings:auto_bid"),
         ],
         [
-            InlineKeyboardButton("🔧 Skills & Keywords", callback_data="settings:skills_keywords"),
+            InlineKeyboardButton(f"Skip Notifications: {skip_notif_status}", callback_data="settings:skip_notif"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -781,34 +536,13 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
     elif action == "poll":
         await query.answer("Use /setpoll <seconds> to change poll interval", show_alert=True)
 
-    elif action == "skills_keywords":
-        # Show myprofile message
-        chat_id = str(query.effective_chat.id)
-        user = repo.get_user(chat_id)
-        name = user.get("name", "Unknown")
-        skills = user.get("skill_ids", "") or "default (global)"
-        keywords = user.get("keywords", "") or "(none - ALL projects)"
-        is_active = "✅ Active" if user.get("is_active", 1) else "❌ Inactive"
+    elif action == "skip_notif":
+        current = repo.get_receive_skipped()
+        repo.set_receive_skipped(not current)
 
-        receive_skipped = user.get("receive_skipped", 1)
-        skip_status = "✅ On" if receive_skipped else "🔕 Off"
-
-        bidstats_details = user.get("show_bidstats_details", 1)
-        bidstats_status = "✅ On" if bidstats_details else "🔕 Off"
-
-        profile_message = (
-            f"👤 <b>Your Profile</b>\n\n"
-            f"<b>Name:</b> {name}\n"
-            f"<b>Status:</b> {is_active}\n"
-            f"<b>Skill IDs:</b> {skills}\n"
-            f"<b>Keywords:</b> {keywords}\n\n"
-            f"<b>Notifications:</b>\n"
-            f"• Skip notifications: {skip_status}\n"
-            f"• Bid stats details: {bidstats_status}\n\n"
-            f"<i>Use /myprofile for more options</i>"
-        )
-
-        await query.edit_message_text(profile_message, parse_mode="HTML")
+        message = _build_settings_message(repo)
+        keyboard = _get_settings_keyboard(repo)
+        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def cmd_setverified(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1535,19 +1269,10 @@ def setup_handlers(application: Application):
     application.add_handler(CommandHandler("bidstats", cmd_bid_stats))
     application.add_handler(CommandHandler("settings", cmd_settings))
 
-    # Multi-user commands (used by /myprofile inline buttons)
-    application.add_handler(CommandHandler("setskills", cmd_setskills))
-    application.add_handler(CommandHandler("setkeywords", cmd_setkeywords))
-    application.add_handler(CommandHandler("setname", cmd_setname))
-    application.add_handler(CommandHandler("myprofile", cmd_myprofile))
-
     # Legacy commands kept for backwards compatibility but hidden from menu
     application.add_handler(CommandHandler("setbudget", cmd_setbudget))
     application.add_handler(CommandHandler("setpoll", cmd_setpoll))
     application.add_handler(CommandHandler("setverified", cmd_setverified))
-
-    # Profile settings callbacks
-    application.add_handler(CallbackQueryHandler(handle_profile_callback, pattern="^profile:"))
 
     # Settings callbacks
     application.add_handler(CallbackQueryHandler(handle_settings_callback, pattern="^settings:"))

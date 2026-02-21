@@ -65,8 +65,8 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
             interval = repo.get_poll_interval()
             logger.info(f"--- Polling cycle (interval: {interval}s) ---")
 
-            # Get combined skill_ids from all users (or global default)
-            skill_ids = repo.get_all_skill_ids()
+            # Use skill_ids from .env
+            skill_ids = settings.skill_ids
 
             # Fetch projects already bid on from Freelancer API
             already_bid_ids = bidding_service.get_my_bidded_project_ids(limit=200)
@@ -295,20 +295,6 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
             repo.mark_queue_status(project_id, "processed")
             repo.add_processed_project(project_id)
 
-            # Get skill_names for matching
-            skill_names = project_data.get("skill_names", "")
-
-            # Find matching users for this project
-            matching_users = repo.get_matching_users(
-                title=project_data["title"],
-                description=project_data["description"],
-                skill_names=skill_names,
-            )
-
-            if not matching_users:
-                logger.info(f"No matching users for project {project_id}")
-                continue
-
             # Send notification based on verdict
             if result.verdict == "BID":
                 # Check auto-bid mode
@@ -364,11 +350,9 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                         except Exception:
                             pass
 
-                    # Send auto-bid result notification
+                    # Send auto-bid result notification to all chat_ids
                     notif_sent = False
-                    for user in matching_users:
-                        chat_id = user.get("chat_id")
-                        user_name = user.get("name", "Unknown")
+                    for chat_id in settings.telegram_chat_ids:
                         if bid_result.success:
                             msg = await notifier.send_auto_bid_notification(
                                 chat_id=chat_id,
@@ -392,7 +376,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                             if msg:
                                 notif_sent = True
 
-                            # Schedule delayed update with fresh stats (edits original message)
+                            # Schedule delayed update with fresh stats
                             if msg and bid_result.bid_id:
                                 from src.services.telegram.notifier import schedule_bid_update
                                 asyncio.create_task(
@@ -417,9 +401,9 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                                 # Disable auto-bid
                                 repo.set_auto_bid(False)
                                 logger.warning("AUTO-BID DISABLED: No bids remaining")
-                                for u in matching_users:
+                                for cid in settings.telegram_chat_ids:
                                     await notifier.send_to_user(
-                                        u.get("chat_id"),
+                                        cid,
                                         "⚠️ *Auto\\-bid disabled* — no bids remaining\\. Projects will continue in manual mode\\.",
                                     )
                             else:
@@ -476,9 +460,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                     # BiddingService for delayed stats update
                     bid_svc = BiddingService()
 
-                    for user in matching_users:
-                        chat_id = user.get("chat_id")
-                        user_name = user.get("name", "Unknown")
+                    for chat_id in settings.telegram_chat_ids:
                         msg = await notifier.send_gpt_decision_notification_to_user(
                             chat_id=chat_id,
                             project_id=project_id,
@@ -511,41 +493,25 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                                     original_keyboard=getattr(msg, '_original_keyboard', None),
                                 )
                             )
-                        logger.info(f"BID notification sent to {user_name} for {project_id}")
+                        logger.info(f"BID notification sent to {chat_id} for {project_id}")
             else:
-                # Get users who want skip notifications (filters out users with receive_skipped=0)
-                logger.debug(f"SKIP verdict for {project_id}, checking users...")
-                all_matching = repo.get_matching_users(
-                    title=project_data["title"],
-                    description=project_data["description"],
-                    skill_names=skill_names,
-                )
-                logger.debug(f"All matching users: {[(u.get('name'), u.get('receive_skipped')) for u in all_matching]}")
-
-                skip_users = repo.get_users_for_skip_notification(
-                    title=project_data["title"],
-                    description=project_data["description"],
-                    skill_names=skill_names,
-                )
-                logger.info(f"SKIP notification: {len(skip_users)} users want it (of {len(all_matching)} matching)")
-
-                # Send SKIP notification to each user who wants them (silent)
-                for user in skip_users:
-                    chat_id = user.get("chat_id")
-                    user_name = user.get("name", "Unknown")
-                    logger.info(f"Sending SKIP to {user_name} ({chat_id}), receive_skipped={user.get('receive_skipped')}")
-                    await notifier.send_skip_notification_to_user(
-                        chat_id=chat_id,
-                        project_id=project_id,
-                        title=project_data["title"],
-                        budget_min=budget_min,
-                        budget_max=budget_max,
-                        currency=currency,
-                        client_country=project_data.get("client_country", "Unknown"),
-                        url=project_data.get("url", ""),
-                        summary=result.summary,
-                    )
-                    logger.info(f"SKIP notification sent to {user_name} for {project_id}")
+                # SKIP verdict — send notification if receive_skipped is enabled
+                if repo.get_receive_skipped():
+                    for chat_id in settings.telegram_chat_ids:
+                        await notifier.send_skip_notification_to_user(
+                            chat_id=chat_id,
+                            project_id=project_id,
+                            title=project_data["title"],
+                            budget_min=budget_min,
+                            budget_max=budget_max,
+                            currency=currency,
+                            client_country=project_data.get("client_country", "Unknown"),
+                            url=project_data.get("url", ""),
+                            summary=result.summary,
+                        )
+                    logger.info(f"SKIP notification sent for {project_id}")
+                else:
+                    logger.info(f"SKIP notification muted for {project_id}")
 
         except Exception as e:
             logger.error(f"Analysis error: {e}")
@@ -597,20 +563,8 @@ async def main():
                       f"{result.get('queue_cleared', 0)} queue, "
                       f"{result.get('pending_cleared', 0)} pending")
 
-    # Auto-register users from settings if not already registered
-    # Users can be manually added with custom names and keywords
-    for i, chat_id in enumerate(settings.telegram_chat_ids):
-        if not repo.get_user(chat_id):
-            # Default name is User1, User2, etc. - they can change via /myprofile
-            repo.add_user(chat_id, f"User{i+1}")
-            logger.info(f"Auto-registered user {chat_id} as User{i+1}")
-
-    # Log registered users with their settings
-    users = repo.get_all_active_users()
-    logger.info(f"Registered users: {len(users)}")
-    for user in users:
-        skip_status = "ON" if user.get('receive_skipped', 1) else "OFF"
-        logger.info(f"  - {user.get('name')} ({user.get('chat_id')}): keywords={user.get('keywords') or '(all)'}, skip_notifications={skip_status}")
+    # Log chat IDs
+    logger.info(f"Telegram chat IDs: {settings.telegram_chat_ids}")
 
     # Record bot start time
     repo.set_bot_start_time()
@@ -663,7 +617,6 @@ async def main():
     await app.bot.set_my_commands([
         BotCommand("status", "Status & Control"),
         BotCommand("settings", "Bot settings"),
-        BotCommand("myprofile", "Your profile"),
         BotCommand("bidstats", "Bid history"),
         BotCommand("help", "Help"),
     ])

@@ -48,7 +48,6 @@ class TelegramBot:
                 ("status", "📊 Show bot status"),
                 ("control", "🎛️ Control panel"),
                 ("settings", "⚙️ Bot settings"),
-                ("myprofile", "👤 Your profile settings"),
                 ("stats", "📈 Show bid statistics"),
                 ("bidstats", "🏆 Show bid win/loss stats"),
             ])
