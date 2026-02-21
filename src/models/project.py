@@ -149,6 +149,14 @@ class Project(BaseModel):
                 if country:
                     owner_data["country"] = country.get("name", "Unknown") or "Unknown"
 
+        # owner_info (returned when owner_info=true param is used)
+        # Most reliable source for client country — overrides previous values
+        owner_info = data.get("owner_info")
+        if owner_info:
+            oi_country = owner_info.get("country", {})
+            if oi_country and oi_country.get("name"):
+                owner_data["country"] = oi_country["name"]
+
         # Get bid stats
         bid_stats_data = data.get("bid_stats", {})
         bid_stats = BidStats(

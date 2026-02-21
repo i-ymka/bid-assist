@@ -162,3 +162,41 @@ class FreelancerClient:
         except Exception as e:
             logger.error(f"Failed to get remaining bids: {e}")
             return None
+
+    def get_project_owner_info(self, project_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch project owner info via auth-v2 API.
+
+        Uses the same projects endpoint but with freelancer-auth-v2 header
+        and owner_info=true to get client's country/city.
+
+        Returns:
+            owner_info dict with country, city etc., or None if unavailable.
+        """
+        auth_v2 = settings.freelancer_auth_v2
+        if not auth_v2:
+            return None
+
+        try:
+            response = requests.get(
+                f"https://www.freelancer.com/api/projects/0.1/projects/{project_id}/",
+                params={"owner_info": "true", "compact": "true"},
+                headers={
+                    "freelancer-auth-v2": auth_v2,
+                    "Accept": "application/json",
+                },
+                timeout=10,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                result = data.get("result", {})
+                owner_info = result.get("owner_info")
+                if owner_info:
+                    logger.debug(f"Project {project_id} owner_info: {owner_info}")
+                    return owner_info
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to get owner info for {project_id}: {e}")
+            return None

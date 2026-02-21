@@ -51,6 +51,7 @@ class ProjectService:
             "user_country_details": "true",
             "bid_details": "true",
             "upgrade_details": "true",
+            "owner_info": "true",
         }
 
         logger.info(f"Fetching active projects...")
@@ -109,6 +110,7 @@ class ProjectService:
             "user_details": "true",
             "user_country_details": "true",
             "bid_details": "true",
+            "owner_info": "true",
         }
 
         logger.debug(f"Fetching details for project {project_id}")
@@ -175,10 +177,10 @@ class ProjectService:
             return [], {}
 
     def get_project_owner_country(self, project_id: int) -> Optional[str]:
-        """Fetch the project owner's country from the bids endpoint.
+        """Fetch the project owner's country.
 
-        The active projects endpoint doesn't return owner_id, so we need to
-        fetch it from the bids endpoint where project_owner_id is available.
+        First tries owner_info via auth-v2 (works even with 0 bids),
+        then falls back to the bids endpoint.
 
         Args:
             project_id: The project ID to fetch owner country for.
@@ -186,6 +188,18 @@ class ProjectService:
         Returns:
             Country name string, or None if unable to determine.
         """
+        # Try auth-v2 owner_info first (most reliable, works with 0 bids)
+        try:
+            owner_info = self._client.get_project_owner_info(project_id)
+            if owner_info:
+                country = owner_info.get("country", {}).get("name")
+                if country:
+                    logger.info(f"Project {project_id}: owner country = {country} (via owner_info)")
+                    return country
+        except Exception as e:
+            logger.debug(f"owner_info fallback failed for {project_id}: {e}")
+
+        # Fallback: bids endpoint (only works if project has bids)
         endpoint = PROJECT_BIDS_ENDPOINT.format(project_id=project_id)
         params = {
             "limit": 1,
@@ -194,20 +208,17 @@ class ProjectService:
         }
 
         try:
-            logger.debug(f"Fetching owner country for project {project_id}...")
+            logger.debug(f"Fetching owner country for project {project_id} via bids...")
             response = self._client.get(endpoint, params=params)
             result = response.get("result", {})
             bids = result.get("bids", [])
-            logger.debug(f"Project {project_id}: got {len(bids)} bids")
 
             if not bids:
                 logger.info(f"Project {project_id}: No bids yet, cannot determine owner country")
                 return None
 
             owner_id = bids[0].get("project_owner_id")
-            logger.debug(f"Project {project_id}: owner_id = {owner_id}")
             if not owner_id:
-                logger.warning(f"Project {project_id}: bid exists but no project_owner_id")
                 return None
 
             users = result.get("users", {})
@@ -215,7 +226,7 @@ class ProjectService:
             location = owner.get("location", {})
             country = location.get("country", {}).get("name")
 
-            logger.info(f"Project {project_id}: owner country = {country}")
+            logger.info(f"Project {project_id}: owner country = {country} (via bids)")
             return country
 
         except Exception as e:
