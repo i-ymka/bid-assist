@@ -427,63 +427,69 @@ async def cmd_bid_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(summary_message, parse_mode="HTML")
 
 
+# Budget presets: (min, max)
+_BUDGET_PRESETS = [
+    (30, 500),
+    (50, 1000),
+    (50, 2000),
+    (50, 3000),
+    (100, 5000),
+]
+
+# Poll interval presets (seconds)
+_POLL_PRESETS = [60, 120, 180, 300, 600]
+
+
 def _build_settings_message(repo: ProjectRepository) -> str:
     """Build the settings message text."""
     state = get_runtime_state()
+    poll_sec = repo.get_poll_interval()
+    poll_min = poll_sec // 60
 
-    verified_status = "✅ Verified" if repo.is_verified() else "❌ Not verified"
-    skip_preferred_status = "✅ On" if repo.skip_preferred_only() else "🔕 Off"
-    auto_bid_status = "🟢 On" if repo.is_auto_bid() else "🔴 Off"
-    skip_notif_status = "✅ On" if repo.get_receive_skipped() else "🔕 Off"
-
-    verified_hint = "(crypto projects)" if verified_status == "❌ Not verified" else "(all projects)"
-    skip_hint = "(skip)" if skip_preferred_status == "✅ On" else "(show)"
-    auto_bid_hint = "(bids placed automatically)" if repo.is_auto_bid() else "(manual confirmation)"
-    skip_notif_hint = "(receive)" if repo.get_receive_skipped() else "(muted)"
+    # Clear Yes/No labels
+    crypto_status = "✅ Yes" if repo.is_verified() else "❌ No"
+    preferred_status = "✅ Yes" if not repo.skip_preferred_only() else "❌ No"
+    auto_bid_status = "✅ Yes" if repo.is_auto_bid() else "❌ No"
+    skipped_status = "✅ Yes" if repo.get_receive_skipped() else "❌ No"
 
     return (
-        f"⚙️ <b>Bot Settings</b>\n\n"
+        f"⚙️ <b>Settings</b>\n\n"
         f"<b>Filters:</b>\n"
-        f"• Budget range: ${state['min_budget']} - ${state['max_budget']}\n"
-        f"• Poll interval: {repo.get_poll_interval()}s\n"
-        f"• My account verified: {verified_status} {verified_hint}\n"
-        f"• Preferred-only projects: {skip_preferred_status} {skip_hint}\n"
+        f"• Budget: ${state['min_budget']} – ${state['max_budget']}\n"
+        f"• Poll: every {poll_min}m ({poll_sec}s)\n"
         f"• Languages: {', '.join(settings.allowed_languages) if settings.allowed_languages else 'all'}\n"
         f"• Blocked currencies: {', '.join(settings.blocked_currencies) if settings.blocked_currencies else 'none'}\n\n"
+        f"<b>Show projects:</b>\n"
+        f"• Crypto (verified account): {crypto_status}\n"
+        f"• Preferred-only: {preferred_status}\n\n"
         f"<b>Bidding:</b>\n"
-        f"• Auto-bid: {auto_bid_status} {auto_bid_hint}\n\n"
+        f"• Auto-bid: {auto_bid_status}\n\n"
         f"<b>Notifications:</b>\n"
-        f"• Skip notifications: {skip_notif_status} {skip_notif_hint}\n\n"
-        f"<i>Use the buttons below to change settings</i>"
+        f"• Show skipped: {skipped_status}"
     )
 
 
 def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
     """Create the keyboard for the settings message."""
-    verified_status = "✅ On" if repo.is_verified() else "🔕 Off"
-    skip_preferred_status = "✅ On" if repo.skip_preferred_only() else "🔕 Off"
-    auto_bid_status = "🟢 On" if repo.is_auto_bid() else "🔴 Off"
-    skip_notif_status = "✅ On" if repo.get_receive_skipped() else "🔕 Off"
     state = get_runtime_state()
+
+    crypto_yn = "✅ Yes" if repo.is_verified() else "❌ No"
+    preferred_yn = "✅ Yes" if not repo.skip_preferred_only() else "❌ No"
+    auto_bid_yn = "✅ Yes" if repo.is_auto_bid() else "❌ No"
+    skipped_yn = "✅ Yes" if repo.get_receive_skipped() else "❌ No"
 
     keyboard = [
         [
-            InlineKeyboardButton(f"💰 Budget: ${state['min_budget']}-${state['max_budget']}", callback_data="settings:budget"),
+            InlineKeyboardButton(f"💰 Budget: ${state['min_budget']}–${state['max_budget']}", callback_data="settings:budget"),
+            InlineKeyboardButton(f"⏱ Poll: {repo.get_poll_interval()}s", callback_data="settings:poll"),
         ],
         [
-            InlineKeyboardButton(f"⏱️ Poll: {repo.get_poll_interval()}s", callback_data="settings:poll"),
+            InlineKeyboardButton(f"Crypto: {crypto_yn}", callback_data="settings:verified"),
+            InlineKeyboardButton(f"Preferred: {preferred_yn}", callback_data="settings:skip_preferred"),
         ],
         [
-            InlineKeyboardButton(f"Verified Account: {verified_status}", callback_data="settings:verified"),
-        ],
-        [
-            InlineKeyboardButton(f"Skip Preferred-Only: {skip_preferred_status}", callback_data="settings:skip_preferred"),
-        ],
-        [
-            InlineKeyboardButton(f"Auto-Bid: {auto_bid_status}", callback_data="settings:auto_bid"),
-        ],
-        [
-            InlineKeyboardButton(f"Skip Notifications: {skip_notif_status}", callback_data="settings:skip_notif"),
+            InlineKeyboardButton(f"Auto-bid: {auto_bid_yn}", callback_data="settings:auto_bid"),
+            InlineKeyboardButton(f"Skipped: {skipped_yn}", callback_data="settings:skip_notif"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -530,10 +536,35 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
 
     elif action == "budget":
-        await query.answer("Use /setbudget <min> <max> to change budget range", show_alert=True)
+        # Cycle through budget presets
+        state = get_runtime_state()
+        current = (state["min_budget"], state["max_budget"])
+        try:
+            idx = _BUDGET_PRESETS.index(current)
+            next_idx = (idx + 1) % len(_BUDGET_PRESETS)
+        except ValueError:
+            next_idx = 0
+        new_min, new_max = _BUDGET_PRESETS[next_idx]
+        state["min_budget"] = new_min
+        state["max_budget"] = new_max
+
+        message = _build_settings_message(repo)
+        keyboard = _get_settings_keyboard(repo)
+        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
 
     elif action == "poll":
-        await query.answer("Use /setpoll <seconds> to change poll interval", show_alert=True)
+        # Cycle through poll presets
+        current = repo.get_poll_interval()
+        try:
+            idx = _POLL_PRESETS.index(current)
+            next_idx = (idx + 1) % len(_POLL_PRESETS)
+        except ValueError:
+            next_idx = 0
+        repo.set_poll_interval(_POLL_PRESETS[next_idx])
+
+        message = _build_settings_message(repo)
+        keyboard = _get_settings_keyboard(repo)
+        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
 
     elif action == "skip_notif":
         current = repo.get_receive_skipped()
