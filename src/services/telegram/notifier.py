@@ -640,12 +640,11 @@ class Notifier:
             f"  {ce('budget')} Budget: {budget_escaped}\n",
             f"  {ce('bids')} Bids: {bid_count} \\(avg: {avg_bid_escaped}\\)\n",
             f"  {ce('country')} Client: {country_escaped}\n",
-            f"\n💡 *AI:* {amount_escaped} · {period} days\n",
             f"\n{ce('link')} *Link:* {url_escaped}\n",
             f"\n{ce('proposal')} *Bid Proposal:*\n```\n{bid_text_escaped}\n```\n",
         ]
 
-        # Bid result section (same format as manual bid)
+        # Bid result section
         lines.append(f"\n{'─' * 30}\n")
         lines.append(f"{random_header_emoji()} *AUTO\\-BID PLACED\\!*\n")
         lines.append(f"{ce('check')} {amount_escaped} · {period} days\n")
@@ -663,7 +662,12 @@ class Notifier:
                 [InlineKeyboardButton("🔗 Check my bid", url=check_url, api_kwargs={"style": "primary"})],
             ])
 
-        return await self.send_to_user(chat_id, text, keyboard)
+        msg = await self.send_to_user(chat_id, text, keyboard)
+        # Attach original text/keyboard for later editing by schedule_bid_update
+        if msg:
+            msg._original_md_text = text
+            msg._original_keyboard = keyboard
+        return msg
 
     async def send_auto_bid_failed_notification(
         self,
@@ -734,13 +738,15 @@ async def schedule_bid_update(
     bid_id: int,
     bidding_service,
     currency: str = "USD",
+    original_text: str = None,
+    original_keyboard: InlineKeyboardMarkup = None,
     delay: int = 60,
 ):
-    """Fetch updated bid stats after a delay and reply to the original message.
+    """Fetch updated bid stats after a delay and edit the original message.
 
     Runs as a background task (asyncio.create_task). After `delay` seconds,
     fetches fresh bid count, average, position, and remaining bids,
-    then sends a short reply to the original bid notification.
+    then appends stats to the original message via edit.
     """
     try:
         await asyncio.sleep(delay)
@@ -758,21 +764,32 @@ async def schedule_bid_update(
             if avg:
                 parts.append(f"avg {avg:.0f} {currency}")
             if rank:
-                parts.append(f"your bid #{rank}")
+                parts.append(f"your bid \\#{rank}")
         if remaining is not None:
             parts.append(f"{remaining} remaining")
 
-        if parts:
-            parts_text = escape_markdown_v2(" · ".join(parts))
-            text = f"{ce('stats')} {parts_text}"
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="MarkdownV2",
-                reply_to_message_id=message_id,
-                disable_notification=True,
-            )
-            logger.info(f"Bid update for {project_id}: {text}")
+        if parts and original_text:
+            stats_line = f"\n{ce('stats')} {' · '.join(parts)}"
+            # Insert stats before the #AUTOBID/#BID tag
+            if "\\#AUTOBID" in original_text:
+                updated_text = original_text.replace("\\#AUTOBID", f"{stats_line}\n\n\\#AUTOBID")
+            elif "\\#BID" in original_text:
+                updated_text = original_text.replace("\\#BID", f"{stats_line}\n\n\\#BID")
+            else:
+                updated_text = original_text + stats_line
+
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=updated_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=original_keyboard,
+                    disable_web_page_preview=True,
+                )
+                logger.info(f"Bid update edited into message for {project_id}: {' · '.join(parts)}")
+            except Exception as edit_err:
+                logger.error(f"Failed to edit message for {project_id}: {edit_err}")
         else:
             logger.debug(f"No updated stats for project {project_id}")
 

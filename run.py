@@ -380,7 +380,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                             if msg:
                                 notif_sent = True
 
-                            # Schedule delayed update with fresh stats
+                            # Schedule delayed update with fresh stats (edits original message)
                             if msg and bid_result.bid_id:
                                 from src.services.telegram.notifier import schedule_bid_update
                                 asyncio.create_task(
@@ -392,6 +392,8 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                                         bid_id=bid_result.bid_id,
                                         bidding_service=bidding_service,
                                         currency=currency,
+                                        original_text=getattr(msg, '_original_md_text', None),
+                                        original_keyboard=getattr(msg, '_original_keyboard', None),
                                     )
                                 )
 

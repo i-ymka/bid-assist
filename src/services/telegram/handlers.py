@@ -1405,6 +1405,11 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         if result.bid_id:
             import asyncio
             from src.services.telegram.notifier import schedule_bid_update
+            # Get the current message text after our edit for later re-editing
+            try:
+                edited_text = original_md + bid_result
+            except Exception:
+                edited_text = None
             asyncio.create_task(
                 schedule_bid_update(
                     bot=context.bot,
@@ -1414,6 +1419,8 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     bid_id=result.bid_id,
                     bidding_service=bidding_service,
                     currency=currency,
+                    original_text=edited_text,
+                    original_keyboard=keyboard,
                 )
             )
 

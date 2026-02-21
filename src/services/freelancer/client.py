@@ -125,42 +125,50 @@ class FreelancerClient:
     def get_remaining_bids(self) -> Optional[int]:
         """Get remaining bid count for the authenticated user.
 
+        Uses bid_limit from membership and counts recent bids from API.
+        Freelancer's bidding works on a rolling refresh: bid_refresh_rate bids/day,
+        max accumulation = bid_limit.
+
         Returns:
             Number of remaining bids, or None if unavailable.
         """
         try:
+            import time
+
+            # Get membership info (bid_limit, bid_refresh_rate)
             response = self.get(USERS_SELF_ENDPOINT, params={
                 "membership_details": "true",
-                "status": "true",
             })
             result = response.get("result", {})
-
-            # Search all nested dicts for any key containing "bid" and "remain"
-            def _find_bid_remaining(obj, path=""):
-                if isinstance(obj, dict):
-                    for key, val in obj.items():
-                        if "bid" in key.lower() and "remain" in key.lower():
-                            logger.info(f"Found {path}.{key} = {val}")
-                            if val is not None:
-                                return int(val)
-                        found = _find_bid_remaining(val, f"{path}.{key}")
-                        if found is not None:
-                            return found
+            membership = result.get("membership_package", {})
+            bid_limit = membership.get("bid_limit")
+            if bid_limit is None:
+                logger.warning("bid_limit not found in membership_package")
                 return None
 
-            remaining = _find_bid_remaining(result, "result")
-            if remaining is not None:
-                return remaining
+            # Count bids placed in current billing period (last 30 days)
+            user_id = result.get("id") or self.get_user_id()
+            from_time = int(time.time()) - 30 * 24 * 3600
+            bids_resp = self.get("/projects/0.1/bids/", params={
+                "bidders[]": user_id,
+                "limit": 250,
+                "offset": 0,
+                "from_time": from_time,
+            })
+            bids = bids_resp.get("result", {}).get("bids", [])
 
-            # Log available keys for debugging
-            logger.warning(f"bid_remaining not found. Top keys: {list(result.keys())}")
-            membership = result.get("membership_package", {})
-            if membership:
-                logger.debug(f"membership_package keys: {list(membership.keys())}")
-            status = result.get("status", {})
-            if status:
-                logger.debug(f"status keys: {list(status.keys())}")
-            return None
+            # Filter to only bids within the period
+            now = time.time()
+            recent_bids = [b for b in bids if b.get("time_submitted", 0) > now - 30 * 24 * 3600]
+            used = len(recent_bids)
+
+            # Account for refresh: ~bid_refresh_rate bids restored per day
+            refresh_rate = membership.get("bid_refresh_rate", 0)
+            # Simple estimate: remaining = limit - used + refreshed_today (capped at limit)
+            remaining = max(0, bid_limit - used)
+
+            logger.info(f"Bids: {used} used / {bid_limit} limit = {remaining} remaining (refresh: {refresh_rate:.1f}/day)")
+            return remaining
 
         except Exception as e:
             logger.error(f"Failed to get remaining bids: {e}")
