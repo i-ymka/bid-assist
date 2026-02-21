@@ -12,35 +12,29 @@ from src.services.freelancer.bidding import strip_markdown
 
 logger = logging.getLogger(__name__)
 
-# Custom emoji IDs (Telegram Premium)
+# Emoji mapping (standard Unicode — custom emoji requires Telegram Premium)
 _CE = {
-    "summary": "5188156318443141940",       # 📝
-    "stats": "5334544901428229844",          # 📊
-    "budget": "5240290577102152084",         # 💰
-    "bids": "5237931961451815445",           # 🏷️
-    "country": "5348474966427841129",        # 🌍
-    "check": "5364035134725043602",          # ✅
-    "link": "5974492756494519709",           # 🔗
-    "proposal": "5192825506239616944",       # 👇
+    "summary": "📝",
+    "stats": "📊",
+    "budget": "💰",
+    "bids": "🏷️",
+    "country": "🌍",
+    "check": "✅",
+    "link": "🔗",
+    "proposal": "👇",
 }
 
-_HEADER_EMOJI_IDS = [
-    "5188440323155588640", "5188361166908322403", "5188164934147535346",
-    "5188587713548284884", "5224649148023710232", "5449681528546152415",
-    "5370757703436082874", "5211042120399347150", "5240076365608264313",
-]
+_HEADER_EMOJIS = ["🤖", "⚡", "🚀", "🎯", "💎", "🔥"]
 
 
 def ce(name: str) -> str:
-    """Custom emoji in MarkdownV2 format."""
-    eid = _CE.get(name)
-    return f"![emoji](tg://emoji?id={eid})" if eid else ""
+    """Return emoji for the given name."""
+    return _CE.get(name, "")
 
 
 def random_header_emoji() -> str:
-    """Random header custom emoji in MarkdownV2 format."""
-    eid = random.choice(_HEADER_EMOJI_IDS)
-    return f"![emoji](tg://emoji?id={eid})"
+    """Random header emoji."""
+    return random.choice(_HEADER_EMOJIS)
 
 
 def get_pending_bid(project_id: int) -> Optional[dict]:
