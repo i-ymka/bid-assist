@@ -1326,14 +1326,15 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     url = bid_data.get("url", "")
     bid_count = bid_data.get("bid_count", 0)
 
-    # Record in database
-    repo.add_bid_record(
+    # Update existing pending_manual record or create new one
+    repo.update_bid_record_on_place(
         project_id=project_id,
         amount=bid_data["amount"],
         period=bid_data["period"],
         description=bid_data["description"],
         success=result.success,
         error_message=result.message if not result.success else None,
+        notification_sent=True,
     )
 
     # Remove from pending

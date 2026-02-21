@@ -335,6 +335,15 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                         description=result.bid_text,
                         success=bid_result.success,
                         error_message=bid_result.message if not bid_result.success else None,
+                        title=project_data["title"],
+                        summary=result.summary,
+                        url=project_data.get("url", ""),
+                        currency=currency,
+                        bid_count=project_data.get("bid_count", 0),
+                        budget_min=budget_min,
+                        budget_max=budget_max,
+                        client_country=project_data.get("client_country", ""),
+                        avg_bid=project_data.get("avg_bid", 0),
                     )
 
                     # Check remaining bids
@@ -345,6 +354,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                         pass
 
                     # Send auto-bid result notification
+                    notif_sent = False
                     for user in matching_users:
                         chat_id = user.get("chat_id")
                         user_name = user.get("name", "Unknown")
@@ -367,6 +377,8 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                                 bid_id=bid_result.bid_id,
                                 remaining_bids=remaining_bids,
                             )
+                            if msg:
+                                notif_sent = True
 
                             # Schedule delayed update with fresh stats
                             if msg and bid_result.bid_id:
@@ -406,6 +418,10 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                                     error=bid_result.message,
                                 )
                             logger.error(f"AUTO-BID FAILED: {project_id} - {bid_result.message}")
+
+                    # Mark notification as sent in bid_history
+                    if notif_sent:
+                        repo.mark_notification_sent(project_id)
                 else:
                     # Manual mode: store pending bid and send notification with Place Bid button
                     repo.add_pending_bid(
@@ -424,10 +440,29 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                         avg_bid=avg_bid,
                     )
 
+                    # Store in bid_history too (not yet placed, but notification data preserved)
+                    repo.add_bid_record(
+                        project_id=project_id,
+                        amount=result.amount,
+                        period=result.period,
+                        description=result.bid_text,
+                        success=False,
+                        error_message="pending_manual",
+                        title=project_data["title"],
+                        summary=result.summary,
+                        url=project_data.get("url", ""),
+                        currency=currency,
+                        bid_count=project_data.get("bid_count", 0),
+                        budget_min=budget_min,
+                        budget_max=budget_max,
+                        client_country=project_data.get("client_country", ""),
+                        avg_bid=avg_bid,
+                    )
+
                     for user in matching_users:
                         chat_id = user.get("chat_id")
                         user_name = user.get("name", "Unknown")
-                        await notifier.send_gpt_decision_notification_to_user(
+                        sent = await notifier.send_gpt_decision_notification_to_user(
                             chat_id=chat_id,
                             project_id=project_id,
                             title=project_data["title"],
@@ -443,6 +478,8 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                             suggested_amount=result.amount,
                             suggested_period=result.period,
                         )
+                        if sent:
+                            repo.mark_notification_sent(project_id)
                         logger.info(f"BID notification sent to {user_name} for {project_id}")
             else:
                 # Get users who want skip notifications (filters out users with receive_skipped=0)

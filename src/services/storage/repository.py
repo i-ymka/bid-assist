@@ -170,6 +170,24 @@ class ProjectRepository:
                     )
                 """)
 
+                # Add notification data columns to bid_history (migration)
+                for col, coltype in [
+                    ("title", "TEXT"),
+                    ("summary", "TEXT"),
+                    ("url", "TEXT"),
+                    ("currency", "TEXT DEFAULT 'USD'"),
+                    ("bid_count", "INTEGER"),
+                    ("budget_min", "REAL"),
+                    ("budget_max", "REAL"),
+                    ("client_country", "TEXT"),
+                    ("avg_bid", "REAL"),
+                    ("notification_sent", "INTEGER DEFAULT 0"),
+                ]:
+                    try:
+                        self._conn.execute(f"ALTER TABLE bid_history ADD COLUMN {col} {coltype}")
+                    except sqlite3.OperationalError:
+                        pass
+
                 # Add receive_skipped column if not exists (migration)
                 try:
                     self._conn.execute("ALTER TABLE user_settings ADD COLUMN receive_skipped INTEGER DEFAULT 1")
@@ -247,16 +265,18 @@ class ProjectRepository:
         description: str,
         success: bool,
         error_message: str = None,
+        title: str = None,
+        summary: str = None,
+        url: str = None,
+        currency: str = "USD",
+        bid_count: int = None,
+        budget_min: float = None,
+        budget_max: float = None,
+        client_country: str = None,
+        avg_bid: float = None,
+        notification_sent: bool = False,
     ) -> bool:
         """Record a bid attempt in history.
-
-        Args:
-            project_id: The project ID.
-            amount: Bid amount.
-            period: Delivery period in days.
-            description: Bid description text.
-            success: Whether the bid was placed successfully.
-            error_message: Error message if bid failed.
 
         Returns:
             True if recorded successfully.
@@ -266,16 +286,96 @@ class ProjectRepository:
                 self._conn.execute(
                     """
                     INSERT INTO bid_history
-                    (project_id, amount, period, description, success, error_message)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (project_id, amount, period, description, success, error_message,
+                     title, summary, url, currency, bid_count, budget_min, budget_max,
+                     client_country, avg_bid, notification_sent)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (project_id, amount, period, description, int(success), error_message),
+                    (project_id, amount, period, description, int(success), error_message,
+                     title, summary, url, currency, bid_count, budget_min, budget_max,
+                     client_country, avg_bid, int(notification_sent)),
                 )
             logger.info(f"Bid record added for project {project_id}")
             return True
         except sqlite3.Error as e:
             logger.error(f"Failed to record bid for project {project_id}: {e}")
             return False
+
+    def update_bid_record_on_place(
+        self,
+        project_id: int,
+        amount: float,
+        period: int,
+        description: str,
+        success: bool,
+        error_message: str = None,
+        notification_sent: bool = True,
+    ) -> bool:
+        """Update an existing pending_manual bid record when bid is actually placed.
+
+        If no pending_manual record exists, creates a new one.
+        """
+        try:
+            with self._conn:
+                cursor = self._conn.cursor()
+                cursor.execute(
+                    "SELECT id FROM bid_history WHERE project_id = ? AND error_message = 'pending_manual'",
+                    (project_id,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    self._conn.execute(
+                        """UPDATE bid_history
+                           SET amount = ?, period = ?, description = ?,
+                               success = ?, error_message = ?, notification_sent = ?
+                           WHERE id = ?""",
+                        (amount, period, description, int(success), error_message,
+                         int(notification_sent), row[0]),
+                    )
+                else:
+                    self.add_bid_record(
+                        project_id=project_id, amount=amount, period=period,
+                        description=description, success=success,
+                        error_message=error_message, notification_sent=notification_sent,
+                    )
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to update bid record for {project_id}: {e}")
+            return False
+
+    def mark_notification_sent(self, project_id: int) -> bool:
+        """Mark notification as sent for a project in bid_history."""
+        try:
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE bid_history SET notification_sent = 1 WHERE project_id = ? AND notification_sent = 0",
+                    (project_id,),
+                )
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to mark notification sent for {project_id}: {e}")
+            return False
+
+    def get_unsent_notifications(self) -> List[dict]:
+        """Get bid records where notification was not sent.
+
+        Returns:
+            List of bid data dicts with all notification fields.
+        """
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("""
+                SELECT project_id, amount, period, description, success, error_message,
+                       title, summary, url, currency, bid_count, budget_min, budget_max,
+                       client_country, avg_bid, created_at
+                FROM bid_history
+                WHERE notification_sent = 0 AND title IS NOT NULL
+                ORDER BY created_at ASC
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            logger.error(f"Failed to get unsent notifications: {e}")
+            return []
 
     def get_bid_stats(self, since: str = None) -> dict:
         """Get statistics about bid history (successful bids only).
