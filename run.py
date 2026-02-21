@@ -473,10 +473,13 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                         avg_bid=avg_bid,
                     )
 
+                    # BiddingService for delayed stats update
+                    bid_svc = BiddingService()
+
                     for user in matching_users:
                         chat_id = user.get("chat_id")
                         user_name = user.get("name", "Unknown")
-                        sent = await notifier.send_gpt_decision_notification_to_user(
+                        msg = await notifier.send_gpt_decision_notification_to_user(
                             chat_id=chat_id,
                             project_id=project_id,
                             title=project_data["title"],
@@ -492,8 +495,22 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                             suggested_amount=result.amount,
                             suggested_period=result.period,
                         )
-                        if sent:
+                        if msg:
                             repo.mark_notification_sent(project_id)
+                            # Schedule delayed bids line update (60s)
+                            from src.services.telegram.notifier import schedule_bid_update
+                            asyncio.create_task(
+                                schedule_bid_update(
+                                    bot=notifier._bot,
+                                    chat_id=chat_id,
+                                    message_id=msg.message_id,
+                                    project_id=project_id,
+                                    bidding_service=bid_svc,
+                                    currency=currency,
+                                    original_text=getattr(msg, '_original_md_text', None),
+                                    original_keyboard=getattr(msg, '_original_keyboard', None),
+                                )
+                            )
                         logger.info(f"BID notification sent to {user_name} for {project_id}")
             else:
                 # Get users who want skip notifications (filters out users with receive_skipped=0)

@@ -22,6 +22,7 @@ _CE = {
     "check":   ("5364035134725043602", "✅"),
     "link":    ("5974492756494519709", "🔗"),
     "proposal":("5192825506239616944", "👇"),
+    "ticket":  ("5238048140317170954", "🎟"),
 }
 
 _HEADER_EMOJIS = [
@@ -103,23 +104,16 @@ def create_updated_keyboard(project_id: int, amount: float, currency: str = None
 def rebuild_bid_message(bid_data: dict) -> str:
     """Rebuild the full bid notification message from bid_data.
 
-    This is used when updating the original message after edits.
-
-    Args:
-        bid_data: Dict with project_id, title, amount, period, description, currency, etc.
-
-    Returns:
-        Formatted message text in MarkdownV2 format.
+    Used when updating the original message after edits (amount/proposal).
+    Matches variant 1 structure.
     """
     title = escape_markdown_v2(bid_data.get("title", "Unknown Project"))
-    # Clean markdown from bid text before displaying
-    bid_text_raw = bid_data.get("description", "")
-    bid_text_clean = strip_markdown(bid_text_raw)
+    bid_text_clean = strip_markdown(bid_data.get("description", ""))
     bid_text = escape_markdown_v2(bid_text_clean)
     currency = bid_data.get("currency", "USD")
     amount = bid_data.get("amount", 0)
     period = bid_data.get("period", 3)
-    url = escape_markdown_v2(bid_data.get("url", ""))
+    url = bid_data.get("url", "")
     bid_count = bid_data.get("bid_count", 0)
     summary = bid_data.get("summary", "")
     budget_min = bid_data.get("budget_min", 0)
@@ -127,40 +121,97 @@ def rebuild_bid_message(bid_data: dict) -> str:
     client_country = bid_data.get("client_country", "")
     avg_bid = bid_data.get("avg_bid", 0)
 
-    suggested_escaped = escape_markdown_v2(f"{amount:.0f} {currency}")
+    if budget_min and budget_max:
+        budget_str = escape_markdown_v2(f"{budget_min:.0f} - {budget_max:.0f} {currency}")
+    elif budget_max:
+        budget_str = escape_markdown_v2(f"up to {budget_max:.0f} {currency}")
+    else:
+        budget_str = "Not specified"
+
+    avg_bid_str = escape_markdown_v2(f"{avg_bid:.0f} {currency}") if avg_bid else "N/A"
+    amount_str = escape_markdown_v2(f"{amount:.0f} {currency}")
+    link = _link_url(url)
 
     lines = [
-        f"{ce('check')} *BID* \\| {title}\n\n",
+        f"*{title}*\n",
+        f"\n{ce('summary')} Summary: {escape_markdown_v2(summary)}\n" if summary else "",
+        f"\n{ce('budget')} Budget: {budget_str}\n",
+        f"{ce('bids')} Bids: {bid_count} \\(avg: {avg_bid_str}\\)\n",
+        f"{ce('country')} Client: {escape_markdown_v2(client_country or 'Unknown')}\n",
+        f"{ce('link')} [Open project]({link})\n" if url else "",
+        f"\n{'─' * 30}\n",
+        f"\n💡 AI said: __Bid: {amount_str} for {period} days__\n",
+        f"\n{ce('proposal')} Bid Proposal:\n```\n{bid_text}\n```\n",
+        f"\n\\#BID",
     ]
 
-    # Budget info
+    return "".join(lines)
+
+
+def build_bid_placed_message(
+    bid_data: dict,
+    rank_info: dict = None,
+    remaining_bids: int = None,
+) -> str:
+    """Build variant 2 message: manual bid placed.
+
+    Header at top, bid result at bottom after proposal.
+    """
+    title = escape_markdown_v2(bid_data.get("title", "Unknown Project"))
+    bid_text_clean = strip_markdown(bid_data.get("description", ""))
+    bid_text = escape_markdown_v2(bid_text_clean)
+    currency = bid_data.get("currency", "USD")
+    amount = bid_data.get("amount", 0)
+    period = bid_data.get("period", 3)
+    url = bid_data.get("url", "")
+    bid_count = bid_data.get("bid_count", 0)
+    summary = bid_data.get("summary", "")
+    budget_min = bid_data.get("budget_min", 0)
+    budget_max = bid_data.get("budget_max", 0)
+    client_country = bid_data.get("client_country", "")
+    avg_bid = bid_data.get("avg_bid", 0)
+
     if budget_min and budget_max:
-        budget_str = escape_markdown_v2(f"${budget_min:.0f} - ${budget_max:.0f} {currency}")
-        lines.append(f"{ce('budget')} *Budget:* {budget_str}\n")
+        budget_str = escape_markdown_v2(f"{budget_min:.0f} - {budget_max:.0f} {currency}")
     elif budget_max:
-        budget_str = escape_markdown_v2(f"up to ${budget_max:.0f} {currency}")
-        lines.append(f"{ce('budget')} *Budget:* {budget_str}\n")
+        budget_str = escape_markdown_v2(f"up to {budget_max:.0f} {currency}")
+    else:
+        budget_str = "Not specified"
 
-    # Country and bids info
-    if client_country:
-        lines.append(f"{ce('country')} *Country:* {escape_markdown_v2(client_country)}\n")
-    avg_bid_str = escape_markdown_v2(f"{avg_bid:.0f} {currency}") if avg_bid else "N/A"
-    lines.append(f"{ce('bids')} Bids: {bid_count} \\(avg: {avg_bid_str}\\)\n")
+    # Build bids line with rank if available
+    if rank_info:
+        rank = rank_info.get("rank")
+        total = rank_info.get("total_bids", bid_count)
+        avg = rank_info.get("avg_bid", avg_bid)
+        avg_str = escape_markdown_v2(f"{avg:.0f} {currency}") if avg else "N/A"
+        if rank:
+            bids_line = f"{ce('bids')} My bid: \\#{rank} out of {total} \\(avg: {avg_str}\\)\n"
+        else:
+            bids_line = f"{ce('bids')} Bids: {total} \\(avg: {avg_str}\\)\n"
+    else:
+        avg_str = escape_markdown_v2(f"{avg_bid:.0f} {currency}") if avg_bid else "N/A"
+        bids_line = f"{ce('bids')} Bids: {bid_count} \\(avg: {avg_str}\\)\n"
 
-    # Summary
-    if summary:
-        lines.append(f"\n{ce('summary')} *Summary:* {escape_markdown_v2(summary)}\n")
+    amount_str = escape_markdown_v2(f"{amount:.0f} {currency}")
+    link = _link_url(url)
 
-    # AI suggestion (compact)
-    lines.append(f"\n💡 *AI:* {suggested_escaped} · {period} days\n")
+    lines = [
+        f"{random_header_emoji()} *BID PLACED\\!*\n",
+        f"*{title}*\n",
+        f"\n{ce('summary')} Summary: {escape_markdown_v2(summary)}\n" if summary else "",
+        f"\n{ce('budget')} Budget: {budget_str}\n",
+        bids_line,
+        f"{ce('country')} Client: {escape_markdown_v2(client_country or 'Unknown')}\n",
+        f"{ce('link')} [Open project]({link})\n" if url else "",
+        f"\n{'─' * 30}\n",
+        f"\n{ce('proposal')} Bid Proposal:\n```\n{bid_text}\n```\n",
+        f"\n{ce('check')} {amount_str} · {period} days\n",
+    ]
 
-    if url:
-        lines.append(f"\n{ce('link')} *Link:* {url}\n")
+    if remaining_bids is not None:
+        lines.append(f"{ce('ticket')} {remaining_bids} bids remaining\n")
 
-    lines.append(f"\n{ce('proposal')} *Bid Proposal:*\n```\n{bid_text}\n```")
-
-    # Add #BID tag (project still needs bidding)
-    lines.append(f"\n\n\\#BID")
+    lines.append(f"\n\\#BID")
 
     return "".join(lines)
 
@@ -172,6 +223,14 @@ def escape_markdown_v2(text: str) -> str:
     for char in escape_chars:
         safe_text = safe_text.replace(char, f"\\{char}")
     return safe_text
+
+
+def _link_url(url: str) -> str:
+    """Escape URL for use inside MarkdownV2 inline link parens.
+
+    Only ) and \\ need escaping inside (...) of [text](url).
+    """
+    return url.replace("\\", "\\\\").replace(")", "\\)")
 
 
 class Notifier:
@@ -231,39 +290,37 @@ class Notifier:
         """Format a project notification message."""
         title = escape_markdown_v2(project.title)
         summary = escape_markdown_v2(analysis.summary)
-        # Clean markdown from bid text before displaying
         bid_text_clean = strip_markdown(analysis.suggested_bid_text)
         bid_text = escape_markdown_v2(bid_text_clean)
         budget_str = escape_markdown_v2(project.budget_str)
-        project_url = escape_markdown_v2(project.url)
         hashtag = f"\\#{analysis.verdict.value}"
 
-        # Client info
         country = escape_markdown_v2(project.owner.country)
         bid_count = project.bid_stats.bid_count
         avg_bid = project.avg_bid_str
+        link_url = _link_url(project.url)
 
         lines = [
             f"*{title}*\n",
-            f"\n{ce('summary')} *Summary:* {summary}\n",
+            f"\n{ce('summary')} Summary: {summary}\n",
             f"\n{ce('budget')} Budget: {budget_str}\n",
             f"{ce('bids')} Bids: {bid_count} \\(avg: {escape_markdown_v2(avg_bid)}\\)\n",
             f"{ce('country')} Client: {country}\n",
+            f"{ce('link')} [Open project]({link_url})\n",
         ]
 
-        # Add NDA warning if required
         if project.nda_required:
             lines.append(f"⚠️ *NDA Required*\n")
 
-        # Add AI suggestion (compact one-liner)
+        lines.append(f"\n{'─' * 30}\n")
+
         if analysis.suggested_amount:
             currency_code = project.currency.code
-            suggested = escape_markdown_v2(f"{analysis.suggested_amount:.0f} {currency_code}")
-            period_str = f" · {analysis.suggested_period} days" if analysis.suggested_period else ""
-            lines.append(f"\n💡 *AI:* {suggested}{period_str}\n")
+            amount_str = escape_markdown_v2(f"{analysis.suggested_amount:.0f} {currency_code}")
+            period_str = f" for {analysis.suggested_period} days" if analysis.suggested_period else ""
+            lines.append(f"\n💡 AI said: __Bid: {amount_str}{period_str}__\n")
 
-        lines.append(f"\n{ce('link')} *Link:* {project_url}\n")
-        lines.append(f"\n{ce('proposal')} *Bid Proposal:*\n```\n{bid_text}\n```\n")
+        lines.append(f"\n{ce('proposal')} Bid Proposal:\n```\n{bid_text}\n```\n")
         lines.append(f"\n{hashtag}")
 
         return "".join(lines)
@@ -359,24 +416,22 @@ class Notifier:
         bid_text: str,
         suggested_amount: float,
         suggested_period: int,
-    ) -> bool:
+    ) -> Optional[Message]:
         """Send BID notification to a specific user.
 
-        Args:
-            chat_id: Telegram chat ID
-            project_id: Freelancer project ID
-            title: Project title
-            ... (same as send_gpt_decision_notification)
-
         Returns:
-            True if notification sent successfully.
+            Message object if sent, None otherwise.
         """
         text, keyboard = self._format_bid_notification(
             project_id, title, budget_min, budget_max, currency,
             client_country, bid_count, avg_bid, url, summary,
             bid_text, suggested_amount, suggested_period
         )
-        return await self.send_to_user(chat_id, text, keyboard)
+        msg = await self.send_to_user(chat_id, text, keyboard)
+        if msg:
+            msg._original_md_text = text
+            msg._original_keyboard = keyboard
+        return msg
 
     def _format_bid_notification(
         self,
@@ -399,7 +454,6 @@ class Notifier:
         Returns:
             Tuple of (text, keyboard).
         """
-        # Format budget string
         if budget_min and budget_max:
             budget_str = f"{budget_min:.0f} - {budget_max:.0f} {currency}"
         elif budget_max:
@@ -407,31 +461,28 @@ class Notifier:
         else:
             budget_str = "Not specified"
 
-        # Format avg bid string
         avg_bid_str = f"{avg_bid:.0f} {currency}" if avg_bid else "N/A"
 
-        # Build message
         title_escaped = escape_markdown_v2(title)
         summary_escaped = escape_markdown_v2(summary)
-        # Clean markdown from bid text before displaying
         bid_text_clean = strip_markdown(bid_text)
         bid_text_escaped = escape_markdown_v2(bid_text_clean)
         budget_escaped = escape_markdown_v2(budget_str)
-        url_escaped = escape_markdown_v2(url)
         country_escaped = escape_markdown_v2(client_country or "Unknown")
         avg_bid_escaped = escape_markdown_v2(avg_bid_str)
-        suggested_escaped = escape_markdown_v2(f"{suggested_amount:.0f} {currency}")
+        amount_str = escape_markdown_v2(f"{suggested_amount:.0f} {currency}")
+        link = _link_url(url)
 
         lines = [
             f"*{title_escaped}*\n",
-            f"\n{ce('summary')} *Summary:* {summary_escaped}\n",
-            f"\n{ce('stats')} *Project Info:*\n",
-            f"  {ce('budget')} Budget: {budget_escaped}\n",
-            f"  {ce('bids')} Bids: {bid_count} \\(avg: {avg_bid_escaped}\\)\n",
-            f"  {ce('country')} Client: {country_escaped}\n",
-            f"\n💡 *AI:* {suggested_escaped} · {suggested_period} days\n",
-            f"\n{ce('link')} *Link:* {url_escaped}\n",
-            f"\n{ce('proposal')} *Bid Proposal:*\n```\n{bid_text_escaped}\n```\n",
+            f"\n{ce('summary')} Summary: {summary_escaped}\n",
+            f"\n{ce('budget')} Budget: {budget_escaped}\n",
+            f"{ce('bids')} Bids: {bid_count} \\(avg: {avg_bid_escaped}\\)\n",
+            f"{ce('country')} Client: {country_escaped}\n",
+            f"{ce('link')} [Open project]({link})\n",
+            f"\n{'─' * 30}\n",
+            f"\n💡 AI said: __Bid: {amount_str} for {suggested_period} days__\n",
+            f"\n{ce('proposal')} Bid Proposal:\n```\n{bid_text_escaped}\n```\n",
             f"\n\\#BID",
         ]
 
@@ -612,7 +663,6 @@ class Notifier:
         remaining_bids: int = None,
     ) -> Optional[Message]:
         """Send auto-bid success notification. Returns Message for delayed updates."""
-        # Format budget string
         if budget_min and budget_max:
             budget_str = f"{budget_min:.0f} - {budget_max:.0f} {currency}"
         elif budget_max:
@@ -625,46 +675,44 @@ class Notifier:
         bid_text_clean = strip_markdown(bid_text)
         bid_text_escaped = escape_markdown_v2(bid_text_clean)
         budget_escaped = escape_markdown_v2(budget_str)
-        url_escaped = escape_markdown_v2(url)
         country_escaped = escape_markdown_v2(client_country or "Unknown")
         amount_escaped = escape_markdown_v2(f"{amount:.0f} {currency}")
+        link = _link_url(url)
 
-        # Build bids line: show rank if available, otherwise initial stats
+        # Build bids line with rank if available
         if rank_info:
             rank = rank_info.get("rank")
             total = rank_info.get("total_bids", bid_count)
             avg = rank_info.get("avg_bid", avg_bid)
             avg_str = escape_markdown_v2(f"{avg:.0f} {currency}") if avg else "N/A"
             if rank:
-                bids_line = f"  {ce('bids')} My bid: \\#{rank} out of {total} \\(avg: {avg_str}\\)\n"
+                bids_line = f"{ce('bids')} My bid: \\#{rank} out of {total} \\(avg: {avg_str}\\)\n"
             else:
-                bids_line = f"  {ce('bids')} Bids: {total} \\(avg: {avg_str}\\)\n"
+                bids_line = f"{ce('bids')} Bids: {total} \\(avg: {avg_str}\\)\n"
         else:
             avg_str = escape_markdown_v2(f"{avg_bid:.0f} {currency}") if avg_bid else "N/A"
-            bids_line = f"  {ce('bids')} Bids: {bid_count} \\(avg: {avg_str}\\)\n"
+            bids_line = f"{ce('bids')} Bids: {bid_count} \\(avg: {avg_str}\\)\n"
 
         lines = [
+            f"{random_header_emoji()} *AUTO\\-BID PLACED\\!*\n",
             f"*{title_escaped}*\n",
-            f"\n{ce('summary')} *Summary:* {summary_escaped}\n",
-            f"\n{ce('stats')} *Project Info:*\n",
-            f"  {ce('budget')} Budget: {budget_escaped}\n",
+            f"\n{ce('summary')} Summary: {summary_escaped}\n",
+            f"\n{ce('budget')} Budget: {budget_escaped}\n",
             bids_line,
-            f"  {ce('country')} Client: {country_escaped}\n",
-            f"\n{ce('link')} *Link:* {url_escaped}\n",
-            f"\n{ce('proposal')} *Bid Proposal:*\n```\n{bid_text_escaped}\n```\n",
+            f"{ce('country')} Client: {country_escaped}\n",
+            f"{ce('link')} [Open project]({link})\n" if url else "",
+            f"\n{'─' * 30}\n",
+            f"\n{ce('proposal')} Bid Proposal:\n```\n{bid_text_escaped}\n```\n",
+            f"\n{ce('check')} {amount_escaped} · {period} days\n",
         ]
 
-        # Bid result section
-        lines.append(f"\n{'─' * 30}\n")
-        lines.append(f"{random_header_emoji()} *AUTO\\-BID PLACED\\!*\n")
-        lines.append(f"{ce('check')} {amount_escaped} · {period} days\n")
         if remaining_bids is not None:
-            lines.append(f"🎟️ {remaining_bids} bids remaining\n")
+            lines.append(f"{ce('ticket')} {remaining_bids} bids remaining\n")
+
         lines.append(f"\n\\#AUTOBID")
 
         text = "".join(lines)
 
-        # Link button to check the bid
         keyboard = None
         if url:
             check_url = f"{url}/proposals"
@@ -673,7 +721,6 @@ class Notifier:
             ])
 
         msg = await self.send_to_user(chat_id, text, keyboard)
-        # Attach original text/keyboard for later editing by schedule_bid_update
         if msg:
             msg._original_md_text = text
             msg._original_keyboard = keyboard
@@ -782,8 +829,8 @@ async def schedule_bid_update(
     chat_id,
     message_id: int,
     project_id: int,
-    bid_id: int,
-    bidding_service,
+    bid_id: int = None,
+    bidding_service=None,
     currency: str = "USD",
     original_text: str = None,
     original_keyboard: InlineKeyboardMarkup = None,
@@ -794,17 +841,32 @@ async def schedule_bid_update(
     Runs as a background task (asyncio.create_task). After `delay` seconds,
     fetches fresh bid count, average, and position, then updates the existing
     bids line in the original message.
+
+    If bid_id is None (variant 1 — info post), fetches stats without rank.
     """
     try:
         await asyncio.sleep(delay)
 
-        rank_info = bidding_service.get_bid_rank(bid_id, project_id, retry_delay=0)
+        if not original_text or not bidding_service:
+            return
 
-        if rank_info and original_text:
-            total = rank_info.get("total_bids")
-            rank = rank_info.get("rank")
-            avg = rank_info.get("avg_bid")
+        rank = None
+        total = None
+        avg = None
 
+        if bid_id:
+            rank_info = bidding_service.get_bid_rank(bid_id, project_id, retry_delay=0)
+            if rank_info:
+                rank = rank_info.get("rank")
+                total = rank_info.get("total_bids")
+                avg = rank_info.get("avg_bid")
+        else:
+            stats = bidding_service.get_project_bid_stats(project_id)
+            if stats:
+                total = stats.get("total_bids")
+                avg = stats.get("avg_bid")
+
+        if total is not None:
             updated_text = replace_bids_line(
                 original_text, rank=rank, total=total, avg=avg, currency=currency,
             )
@@ -819,7 +881,10 @@ async def schedule_bid_update(
                         reply_markup=original_keyboard,
                         disable_web_page_preview=True,
                     )
-                    logger.info(f"Bids line updated for {project_id}: #{rank} out of {total} (avg: {avg:.0f})")
+                    if rank:
+                        logger.info(f"Bids line updated for {project_id}: #{rank} out of {total} (avg: {avg:.0f})")
+                    else:
+                        logger.info(f"Bids line updated for {project_id}: {total} bids (avg: {avg:.0f})")
                 except Exception as edit_err:
                     logger.error(f"Failed to edit message for {project_id}: {edit_err}")
             else:

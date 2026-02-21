@@ -1363,33 +1363,13 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 [InlineKeyboardButton("🔗 Check my bid", url=check_bid_url, api_kwargs={"style": "primary"})]
             ])
 
-        # Get original message in MarkdownV2 format and append bid result
-        from src.services.telegram.notifier import escape_markdown_v2, replace_bids_line
+        # Build variant 2 message from scratch
+        from src.services.telegram.notifier import build_bid_placed_message
         try:
-            original_md = query.message.text_markdown_v2
-            if not original_md:
-                original_md = escape_markdown_v2(query.message.text or "")
-
-            # Update bids line in-place with rank info
-            if rank_info:
-                original_md = replace_bids_line(
-                    original_md,
-                    rank=rank_info.get("rank"),
-                    total=rank_info.get("total_bids"),
-                    avg=rank_info.get("avg_bid"),
-                    currency=currency,
-                )
-
-            bid_result_text = (
-                f"\n\n{'─' * 30}\n"
-                f"{random_header_emoji()} *BID PLACED\\!*\n"
-                f"{ce('check')} {bid_data['amount']:.0f} {escape_markdown_v2(currency)} · {bid_data['period']} days\n"
-            )
-            if remaining_bids is not None:
-                bid_result_text += f"🎟️ {remaining_bids} bids remaining\n"
+            placed_text = build_bid_placed_message(bid_data, rank_info, remaining_bids)
 
             await query.edit_message_text(
-                text=original_md + bid_result_text,
+                text=placed_text,
                 parse_mode="MarkdownV2",
                 reply_markup=keyboard,
                 disable_web_page_preview=True,
@@ -1420,7 +1400,7 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             import asyncio
             from src.services.telegram.notifier import schedule_bid_update
             try:
-                edited_text = original_md + bid_result_text
+                edited_text = placed_text
             except Exception:
                 edited_text = None
             asyncio.create_task(

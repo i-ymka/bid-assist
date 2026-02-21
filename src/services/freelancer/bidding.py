@@ -314,3 +314,40 @@ class BiddingService:
     def get_remaining_bids(self) -> Optional[int]:
         """Get remaining bid count."""
         return self._client.get_remaining_bids()
+
+    def get_project_bid_stats(self, project_id: int) -> Optional[dict]:
+        """Get current bid count and average for a project.
+
+        Used for delayed bids line updates on info posts (variant 1)
+        where we don't have our own bid_id.
+
+        Returns:
+            {"total_bids": N, "avg_bid": X} or None
+        """
+        try:
+            endpoint = f"/projects/0.1/projects/{project_id}/bids/"
+            response = self._client.get(endpoint, params={"limit": 1})
+            result = response.get("result", {})
+            bids = result.get("bids", [])
+
+            # Get total count from the first bid's project stats or count field
+            # The API may return bid_stats at result level
+            total = len(bids)
+            avg = None
+
+            # Try to get more accurate count from project endpoint
+            proj_response = self._client.get(
+                f"/projects/0.1/projects/{project_id}/",
+                params={"bid_details": "true"},
+            )
+            proj_result = proj_response.get("result", {})
+            bid_stats = proj_result.get("bid_stats", {})
+            if bid_stats:
+                total = bid_stats.get("bid_count", total) or total
+                avg = bid_stats.get("bid_avg")
+
+            return {"total_bids": total, "avg_bid": avg}
+
+        except Exception as e:
+            logger.warning(f"Failed to get bid stats for project {project_id}: {e}")
+            return None
