@@ -12,13 +12,10 @@ class Settings(BaseSettings):
     freelancer_oauth_token: str = Field(..., alias="FREELANCER_OAUTH_TOKEN")
     freelancer_auth_v2: str = Field("", alias="FREELANCER_AUTH_V2")
     telegram_bot_token: str = Field(..., alias="TELEGRAM_BOT_TOKEN")
-    gemini_api_key: str = Field("", alias="GEMINI_API_KEY")
-
     # Telegram Settings
     telegram_chat_ids_raw: str = Field("", alias="TELEGRAM_CHAT_IDS")
 
-    # LLM Settings
-    llm_model: str = Field("gemini-2.0-flash", alias="LLM_MODEL")
+    # Gemini CLI model (fallback chain handled in gemini_analyzer.py)
     gemini_model: str = Field("gemini-3-pro-preview", alias="GEMINI_MODEL")
 
     # Filtering Settings
@@ -52,9 +49,6 @@ class Settings(BaseSettings):
 
     # Database
     db_path: str = Field("processed_projects.db", alias="DB_PATH")
-
-    # AI Prompt file path
-    ai_prompt_file: str = Field("prompt.txt", alias="AI_PROMPT_FILE")
 
     class Config:
         env_file = ".env"

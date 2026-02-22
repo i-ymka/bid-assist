@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 # Path to pal_rules.md
 RULES_PATH = Path(__file__).parent.parent.parent.parent / "pal_rules.md"
 
-# Model fallback state
-FALLBACK_MODEL = "gemini-2.5-pro"
-_primary_cooldown_until: float = 0  # timestamp when primary model can be retried
+# Model fallback chain: primary → fallbacks in order
+FALLBACK_MODELS = ["gemini-2.5-pro"]
+_cooldowns: dict[str, float] = {}  # model -> timestamp when it can be retried
 
 
 @dataclass
@@ -125,28 +125,29 @@ def _extract_clean_error(stderr: str) -> str:
 
 
 def _run_gemini_cli(prompt: str, model: str, timeout: int = 600) -> Optional[str]:
-    """Run Gemini CLI with automatic model fallback on 429 errors.
+    """Run Gemini CLI with automatic model fallback chain on 429 errors.
 
-    Tries the primary model first. If it fails with 429, falls back
-    to FALLBACK_MODEL and puts primary on a 5-minute cooldown.
+    Builds a chain: primary → fallback1 → fallback2.
+    Each model that hits 429 gets a 5-minute cooldown.
 
     Returns:
         CLI stdout text, or None if all attempts failed.
     """
-    global _primary_cooldown_until
+    # Build model chain: primary + fallbacks (skip duplicates, skip cooled-down)
+    now = time.time()
+    all_models = [model] + [m for m in FALLBACK_MODELS if m != model]
+    models_to_try = []
+    for m in all_models:
+        cooldown_until = _cooldowns.get(m, 0)
+        if now < cooldown_until:
+            remaining = int(cooldown_until - now)
+            logger.info(f"Model {m} on cooldown ({remaining}s left), skipping")
+        else:
+            models_to_try.append(m)
 
-    primary_model = model
-    use_fallback = primary_model != FALLBACK_MODEL
-
-    # If primary is on cooldown, start with fallback
-    if use_fallback and time.time() < _primary_cooldown_until:
-        remaining = int(_primary_cooldown_until - time.time())
-        logger.info(f"Model {primary_model} on cooldown ({remaining}s left), using {FALLBACK_MODEL}")
-        models_to_try = [FALLBACK_MODEL]
-    elif use_fallback:
-        models_to_try = [primary_model, FALLBACK_MODEL]
-    else:
-        models_to_try = [primary_model]
+    if not models_to_try:
+        logger.error("All models are on cooldown, cannot analyze")
+        return None
 
     for current_model in models_to_try:
         try:
@@ -169,11 +170,11 @@ def _run_gemini_cli(prompt: str, model: str, timeout: int = 600) -> Optional[str
 
                 if error_type == "capacity":
                     logger.warning(f"Model {current_model}: 429 — {clean_msg}")
-                    if current_model == primary_model and use_fallback:
-                        _primary_cooldown_until = time.time() + 300  # 5 min cooldown
-                        logger.info(f"Falling back to {FALLBACK_MODEL}, will retry {primary_model} in 5 min")
-                        continue
-                    return None
+                    _cooldowns[current_model] = time.time() + 300  # 5 min cooldown
+                    next_models = [m for m in models_to_try if m != current_model and models_to_try.index(m) > models_to_try.index(current_model)]
+                    if next_models:
+                        logger.info(f"Falling back to {next_models[0]}, will retry {current_model} in 5 min")
+                    continue
                 elif error_type == "cancelled":
                     logger.info(f"Gemini CLI interrupted (Ctrl+C)")
                     return None
@@ -181,9 +182,8 @@ def _run_gemini_cli(prompt: str, model: str, timeout: int = 600) -> Optional[str
                     logger.error(f"Gemini CLI failed ({current_model}): {clean_msg}")
                     return None
 
-            # Success — clear cooldown if primary worked
-            if current_model == primary_model:
-                _primary_cooldown_until = 0
+            # Success — clear cooldown
+            _cooldowns.pop(current_model, None)
 
             response = result.stdout.strip()
             # Clean Gemini CLI boilerplate from output
@@ -195,9 +195,7 @@ def _run_gemini_cli(prompt: str, model: str, timeout: int = 600) -> Optional[str
 
         except subprocess.TimeoutExpired:
             logger.error(f"Gemini CLI timed out ({current_model}, {timeout}s)")
-            if current_model == primary_model and use_fallback:
-                continue
-            return None
+            continue
 
     return None
 
