@@ -341,7 +341,14 @@ def _fetch_bid_stats_sync(recent_bids: list) -> dict:
             if winning_bid and winner_amount > 0:
                 outcome = "LOSS" if winning_bid.get('bidder_id') != my_user_id else "MY_WIN"
             elif project.status in AWARDED_STATUSES:
-                outcome = "SEALED"
+                # Project awarded/in progress but we can't see the winner
+                # Check if any of OUR bids have award status
+                my_bid = next((b for b in bids if b.get('bidder_id') == my_user_id), None)
+                my_award = my_bid.get('award_status', '') if my_bid else ''
+                if my_award in WINNER_AWARD_STATUSES:
+                    outcome = "MY_WIN"
+                else:
+                    outcome = "LOSS_SEALED"  # awarded to someone else, details hidden
             elif project.status in CLOSED_STATUSES:
                 outcome = "NO_WINNER"
 
@@ -375,11 +382,17 @@ def _fetch_bid_stats_sync(recent_bids: list) -> dict:
                 msg += "<blockquote>" + html.escape(our_bid_text) + "</blockquote>"
                 win_loss_messages.append(msg)
 
+            elif outcome == "LOSS_SEALED":
+                loss_count += 1
+                msg = f"❌ <b>{title_link}</b>\n"
+                msg += f"Bid placed on: {date_fmt}\n"
+                msg += f"Your Bid: ${our_bid_amount:.2f}\n"
+                msg += f"<i>Awarded to another freelancer (details hidden)</i>"
+                win_loss_messages.append(msg)
+
             else:
                 other_count += 1
-                if outcome == "SEALED":
-                    uninteresting_lines.append(f"🔒 {title_link} - <i>Winner hidden</i>")
-                elif outcome == "NO_WINNER":
+                if outcome == "NO_WINNER":
                     uninteresting_lines.append(f"🚫 {title_link} - <i>Closed, no winner</i>")
                 else:
                     uninteresting_lines.append(f"⏳ {title_link} - <i>Active</i>")
@@ -421,25 +434,24 @@ async def cmd_bid_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loss_count = data["loss_count"]
         other_count = data["other_count"]
 
-        # Send results
-        if uninteresting_lines:
-            uninteresting_message = "📊 <b>Other Projects</b>\n\n" + "\n".join(uninteresting_lines)
-            await send_in_chunks(update, uninteresting_message, max_length=2000)
-
+        # Send results: detailed wins/losses first, then pending
         if win_loss_messages:
-            await update.message.reply_text(f"<b>Detailed Results ({len(win_loss_messages)}):</b>", parse_mode="HTML")
             for msg in win_loss_messages:
                 try:
                     await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
                 except telegram_error.TelegramError as e:
                     logger.error(f"Failed to send stats card: {e}")
 
+        if uninteresting_lines:
+            uninteresting_message = "📊 <b>Pending / Closed</b>\n\n" + "\n".join(uninteresting_lines)
+            await send_in_chunks(update, uninteresting_message, max_length=2000)
+
         summary_message = (
             "🏁 <b>Summary</b>\n"
             f"Reviewed: {len(recent_bids)}\n"
             f"✅ Won: {win_count}\n"
             f"❌ Lost: {loss_count}\n"
-            f"⚪ Other: {other_count}"
+            f"⏳ Pending: {other_count}"
         )
         await update.message.reply_text(summary_message, parse_mode="HTML")
 
