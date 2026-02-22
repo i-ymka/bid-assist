@@ -1329,7 +1329,7 @@ class ProjectRepository:
                     INSERT OR REPLACE INTO runtime_settings (key, value, updated_at)
                     VALUES ('bot_start_time', ?, CURRENT_TIMESTAMP)
                     """,
-                    (datetime.now().isoformat(),),
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
                 )
             return True
         except sqlite3.Error as e:

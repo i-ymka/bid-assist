@@ -303,128 +303,149 @@ async def send_in_chunks(update: Update, text: str, max_length: int = 4096):
         )
 
 
-async def cmd_bid_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /bidstats command according to user preferences."""
-    await update.message.reply_text("⏳ Fetching bid statistics, please wait...")
+def _fetch_bid_stats_sync(recent_bids: list) -> dict:
+    """Fetch bid stats data synchronously (runs in thread pool).
 
-    repo = ProjectRepository()
+    Returns dict with uninteresting_lines, win_loss_messages, counts.
+    """
     project_service = ProjectService()
     client = FreelancerClient()
     my_user_id = client.get_user_id()
-    
-    show_details = True  # Always show details
 
+    uninteresting_lines = []
+    win_loss_messages = []
+    win_count, loss_count, other_count = 0, 0, 0
+
+    AWARDED_STATUSES = {"awarded", "complete", "accepted", "inprogress"}
+    CLOSED_STATUSES = {"closed", "cancelled", "expired"}
+    WINNER_AWARD_STATUSES = {"awarded", "accepted"}
+
+    for project_id, our_bid_amount, bid_date_str, our_bid_text in recent_bids:
+        try:
+            project = project_service.get_project_details(project_id)
+            if not project:
+                uninteresting_lines.append(f"• <b>Project {project_id}</b> - <i>Could not fetch details</i>")
+                other_count += 1
+                continue
+
+            bids, users = project_service.get_project_bids(project_id)
+            winning_bid = next((b for b in bids if b.get('award_status') in WINNER_AWARD_STATUSES), None)
+
+            # Determine outcome
+            outcome = "OPEN"
+            winner_amount = 0.0
+
+            if winning_bid:
+                winner_amount = winning_bid.get('amount', 0.0)
+
+            if winning_bid and winner_amount > 0:
+                outcome = "LOSS" if winning_bid.get('bidder_id') != my_user_id else "MY_WIN"
+            elif project.status in AWARDED_STATUSES:
+                outcome = "SEALED"
+            elif project.status in CLOSED_STATUSES:
+                outcome = "NO_WINNER"
+
+            # Format Date
+            try:
+                date_obj = datetime.fromisoformat(bid_date_str)
+                date_fmt = date_obj.strftime("%d %b %Y")
+            except Exception:
+                date_fmt = bid_date_str
+
+            title_link = f"<a href='{project.url}'>{html.escape(project.title)}</a>"
+
+            if outcome == "LOSS":
+                loss_count += 1
+                winner_user = users.get(str(winning_bid.get('bidder_id')), {})
+                winner_country = winner_user.get('location', {}).get('country', {}).get('name', 'N/A')
+                winner_proposal = html.escape(winning_bid.get('description', '')) or '<i>(No text)</i>'
+
+                msg = f"❌ <b>{title_link}</b>\n"
+                msg += f"Bid placed on: {date_fmt}\n"
+                msg += f"Your Bid: ${our_bid_amount:.2f}\n"
+                msg += f"Winning Bid: ${winner_amount:.2f} ({winner_country})\n"
+                msg += "<blockquote>" + winner_proposal + "</blockquote>"
+                win_loss_messages.append(msg)
+
+            elif outcome == "MY_WIN":
+                win_count += 1
+                msg = f"✅ <b>{title_link}</b>\n"
+                msg += f"Bid placed on: {date_fmt}\n"
+                msg += f"<b>You won! Price: ${our_bid_amount:.2f}</b>\n"
+                msg += "<blockquote>" + html.escape(our_bid_text) + "</blockquote>"
+                win_loss_messages.append(msg)
+
+            else:
+                other_count += 1
+                if outcome == "SEALED":
+                    uninteresting_lines.append(f"🔒 {title_link} - <i>Winner hidden</i>")
+                elif outcome == "NO_WINNER":
+                    uninteresting_lines.append(f"🚫 {title_link} - <i>Closed, no winner</i>")
+                else:
+                    uninteresting_lines.append(f"⏳ {title_link} - <i>Active</i>")
+
+        except Exception as e:
+            logger.error(f"Error processing bid stats for project {project_id}: {e}")
+            other_count += 1
+            continue
+
+    return {
+        "uninteresting_lines": uninteresting_lines,
+        "win_loss_messages": win_loss_messages,
+        "win_count": win_count,
+        "loss_count": loss_count,
+        "other_count": other_count,
+    }
+
+
+async def cmd_bid_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /bidstats command."""
+    await update.message.reply_text("⏳ Fetching bid statistics, please wait...")
+
+    repo = ProjectRepository()
     recent_bids = repo.get_recent_bids(limit=25)
 
     if not recent_bids:
         await update.message.reply_text("No recent successful bids found.")
         return
 
-    # --- 1. Process all projects first ---
-    
-    uninteresting_lines = []
-    win_loss_messages = []
-    win_count, loss_count, other_count = 0, 0, 0
-    
-    AWARDED_STATUSES = {"awarded", "complete", "accepted", "inprogress"}
-    CLOSED_STATUSES = {"closed", "cancelled", "expired"}
-    WINNER_AWARD_STATUSES = {"awarded", "accepted"}
+    try:
+        # Run blocking API calls in thread pool
+        import asyncio
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, _fetch_bid_stats_sync, recent_bids)
 
-    for project_id, our_bid_amount, bid_date_str, our_bid_text in recent_bids:
-        project = project_service.get_project_details(project_id)
-        if not project:
-            if show_details:
-                uninteresting_lines.append(f"• <b>Project {project_id}</b> - <i>Could not fetch details</i>")
-            other_count += 1
-            continue
+        uninteresting_lines = data["uninteresting_lines"]
+        win_loss_messages = data["win_loss_messages"]
+        win_count = data["win_count"]
+        loss_count = data["loss_count"]
+        other_count = data["other_count"]
 
-        bids, users = project_service.get_project_bids(project_id)
-        winning_bid = next((b for b in bids if b.get('award_status') in WINNER_AWARD_STATUSES), None)
-        
-        # Determine outcome
-        outcome = "OPEN"
-        winner_amount = 0.0
-        
-        if winning_bid:
-             winner_amount = winning_bid.get('amount', 0.0)
+        # Send results
+        if uninteresting_lines:
+            uninteresting_message = "📊 <b>Other Projects</b>\n\n" + "\n".join(uninteresting_lines)
+            await send_in_chunks(update, uninteresting_message, max_length=2000)
 
-        if winning_bid and winner_amount > 0:
-            outcome = "LOSS" if winning_bid.get('bidder_id') != my_user_id else "MY_WIN"
-        elif project.status in AWARDED_STATUSES:
-            # Awarded but we don't see a winning bid with amount > 0 or status 'awarded' in bids list
-            # This usually means it's sealed or hidden
-            outcome = "SEALED"
-        elif project.status in CLOSED_STATUSES:
-            outcome = "NO_WINNER"
+        if win_loss_messages:
+            await update.message.reply_text(f"<b>Detailed Results ({len(win_loss_messages)}):</b>", parse_mode="HTML")
+            for msg in win_loss_messages:
+                try:
+                    await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
+                except telegram_error.TelegramError as e:
+                    logger.error(f"Failed to send stats card: {e}")
 
-        # Format Date
-        try:
-            date_obj = datetime.fromisoformat(bid_date_str)
-            date_fmt = date_obj.strftime("%d %b %Y")
-        except:
-            date_fmt = bid_date_str
+        summary_message = (
+            "🏁 <b>Summary</b>\n"
+            f"Reviewed: {len(recent_bids)}\n"
+            f"✅ Won: {win_count}\n"
+            f"❌ Lost: {loss_count}\n"
+            f"⚪ Other: {other_count}"
+        )
+        await update.message.reply_text(summary_message, parse_mode="HTML")
 
-        # Clean title link (no explicit ID in text, ID in link is fine)
-        title_link = f"<a href='{project.url}'>{html.escape(project.title)}</a>"
-
-        if outcome == "LOSS":
-            loss_count += 1
-            winner_user = users.get(str(winning_bid.get('bidder_id')), {})
-            winner_country = winner_user.get('location', {}).get('country', {}).get('name', 'N/A')
-            winner_proposal = html.escape(winning_bid.get('description', '')) or '<i>(No text)</i>'
-            
-            msg = f"❌ <b>{title_link}</b>\n"
-            msg += f"Bid placed on: {date_fmt}\n"
-            msg += f"Your Bid: ${our_bid_amount:.2f}\n"
-            msg += f"Winning Bid: ${winner_amount:.2f} ({winner_country})\n"
-            msg += "<blockquote>" + winner_proposal + "</blockquote>"
-            win_loss_messages.append(msg)
-            
-        elif outcome == "MY_WIN":
-            win_count += 1
-            msg = f"✅ <b>{title_link}</b>\n"
-            msg += f"Bid placed on: {date_fmt}\n"
-            msg += f"<b>You won! Price: ${our_bid_amount:.2f}</b>\n"
-            msg += "<blockquote>" + html.escape(our_bid_text) + "</blockquote>"
-            win_loss_messages.append(msg)
-
-        else: # Sealed, No Winner, or Open
-            other_count += 1
-            if show_details:
-                if outcome == "SEALED":
-                    uninteresting_lines.append(f"🔒 {title_link} - <i>Winner hidden</i>")
-                elif outcome == "NO_WINNER":
-                    uninteresting_lines.append(f"🚫 {title_link} - <i>Closed, no winner</i>")
-                else: # OPEN
-                    uninteresting_lines.append(f"⏳ {title_link} - <i>Active</i>")
-
-    # --- 2. Send all messages ---
-
-    # Send the block of uninteresting projects first, if applicable and enabled
-    if show_details and uninteresting_lines:
-        uninteresting_message = "📊 <b>Other Projects</b>\n\n" + "\n".join(uninteresting_lines)
-        await send_in_chunks(update, uninteresting_message, max_length=2000)
-
-    # Send the detailed win/loss cards (one by one as requested for clarity)
-    if win_loss_messages:
-        await update.message.reply_text(f"<b>Detailed Results ({len(win_loss_messages)}):</b>", parse_mode="HTML")
-        for msg in win_loss_messages:
-            try:
-                await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
-            except telegram_error.TelegramError as e:
-                logger.error(f"Failed to send stats card: {e}")
-                # Fallback to simple text if HTML fails
-                await update.message.reply_text("❌ Error sending a details card (formatting issue).")
-
-    # Send the final summary
-    summary_message = (
-        "🏁 <b>Summary</b>\n"
-        f"Reviewed: {len(recent_bids)}\n"
-        f"✅ Won: {win_count}\n"
-        f"❌ Lost: {loss_count}\n"
-        f"⚪ Other: {other_count}"
-    )
-    await update.message.reply_text(summary_message, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error in /bidstats: {e}")
+        await update.message.reply_text(f"❌ Error fetching bid stats: {e}")
 
 
 # Budget presets: (min, max)
