@@ -396,13 +396,29 @@ def _fetch_bid_stats_sync(recent_bids: list) -> dict:
                 winning_amounts_usd.append(to_usd(our_amount, currency))
 
             elif outcome == "LOSS":
-                winner_user = users.get(str(winning_bid.get("bidder_id")), {})
-                winner_country = (
-                    winner_user.get("location", {})
-                    .get("country", {})
-                    .get("name", "N/A")
-                )
                 winner_proposal = winning_bid.get("description", "") or ""
+                winner_bidder_id = winning_bid.get("bidder_id")
+
+                # API call 3: fetch winner's profile (rating, reviews, country)
+                winner_profile = {}
+                try:
+                    resp = client.get(
+                        f"/users/0.1/users/{winner_bidder_id}/",
+                        params={"reputation": "true", "country_details": "true"},
+                    )
+                    wr = resp.get("result", {})
+                    if wr:
+                        rep = wr.get("reputation", {}).get("entire_history", {})
+                        loc = wr.get("location", {})
+                        winner_profile = {
+                            "username": wr.get("username", ""),
+                            "country": loc.get("country", {}).get("name", "N/A") if loc else "N/A",
+                            "rating": rep.get("overall"),
+                            "reviews": rep.get("reviews"),
+                            "completion_rate": rep.get("completion_rate"),
+                        }
+                except Exception as e:
+                    logger.warning(f"Could not fetch winner profile {winner_bidder_id}: {e}")
 
                 losses_visible.append({
                     **base,
@@ -410,7 +426,7 @@ def _fetch_bid_stats_sync(recent_bids: list) -> dict:
                     "our_amount": our_amount,
                     "our_proposal": our_proposal,
                     "winner_amount": winner_amount,
-                    "winner_country": winner_country,
+                    "winner_profile": winner_profile,
                     "winner_proposal": winner_proposal,
                 })
                 winning_amounts_usd.append(to_usd(winner_amount, currency))
@@ -538,13 +554,33 @@ def _build_loss_card(loss: dict, is_sealed: bool = False) -> str:
         lines.append("🔒 <i>Awarded to another (details hidden)</i>")
     else:
         winner_amount = loss.get("winner_amount", 0)
-        winner_country = loss.get("winner_country", "N/A")
+        wp = loss.get("winner_profile", {})
         winner_proposal = html.escape(loss.get("winner_proposal", ""))
         if len(winner_proposal) > _MAX_PROPOSAL_LEN:
             winner_proposal = winner_proposal[:_MAX_PROPOSAL_LEN] + "..."
 
+        # Winner header with profile stats
         lines.append("")
-        lines.append(f"🏆 Winner: {winner_amount:.0f} {currency} · {html.escape(winner_country)}")
+        country = html.escape(wp.get("country", "N/A")) if wp else "N/A"
+        winner_line = f"🏆 Winner: {winner_amount:.0f} {currency} · {country}"
+        if wp:
+            username = wp.get("username")
+            if username:
+                winner_line = f"🏆 Winner: @{html.escape(username)} · {winner_amount:.0f} {currency}"
+            parts = []
+            rating = wp.get("rating")
+            if rating is not None:
+                parts.append(f"⭐{rating:.1f}")
+            reviews = wp.get("reviews")
+            if reviews is not None:
+                parts.append(f"{reviews} reviews")
+            cr = wp.get("completion_rate")
+            if cr is not None:
+                parts.append(f"{cr * 100:.0f}%")
+            if parts:
+                winner_line += f"\n{country} · {' · '.join(parts)}"
+        lines.append(winner_line)
+
         if winner_proposal:
             lines.append(f"<blockquote>{winner_proposal}</blockquote>")
         else:
