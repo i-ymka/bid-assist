@@ -377,9 +377,16 @@ def _fetch_bid_stats_sync(recent_bids: list) -> dict:
             if winning_bid:
                 winner_amount = winning_bid.get("amount", 0.0)
 
-            if winning_bid and winner_amount > 0:
-                outcome = "LOSS" if winning_bid.get("bidder_id") != my_user_id else "MY_WIN"
+            if winning_bid:
+                # Awarded bid exists — someone won
+                if winning_bid.get("bidder_id") == my_user_id:
+                    outcome = "MY_WIN"
+                elif winner_amount > 0:
+                    outcome = "LOSS"  # visible winner with amount
+                else:
+                    outcome = "LOSS_SEALED"  # winner exists but amount hidden (0.0)
             elif project.status in AWARDED_STATUSES:
+                # No awarded bid visible but project is in progress
                 my_bid = next((b for b in bids if b.get("bidder_id") == my_user_id), None)
                 my_award = my_bid.get("award_status", "") if my_bid else ""
                 if my_award in WINNER_AWARD_STATUSES:
