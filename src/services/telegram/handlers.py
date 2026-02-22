@@ -306,157 +306,324 @@ async def send_in_chunks(update: Update, text: str, max_length: int = 4096):
 def _fetch_bid_stats_sync(recent_bids: list) -> dict:
     """Fetch bid stats data synchronously (runs in thread pool).
 
-    Returns dict with uninteresting_lines, win_loss_messages, counts.
+    Takes sqlite3.Row objects from get_recent_bids_full().
+    Uses DB data for static fields, API only for current status + winner info.
+
+    Returns dict with structured data for dashboard + loss cards + compact summary.
     """
+    from src.services.currency import to_usd
+
     project_service = ProjectService()
     client = FreelancerClient()
     my_user_id = client.get_user_id()
 
-    uninteresting_lines = []
-    win_loss_messages = []
-    win_count, loss_count, other_count = 0, 0, 0
+    wins = []
+    losses_visible = []
+    losses_sealed = []
+    no_winner = []
+    active = []
+    error_count = 0
+    winning_amounts_usd = []
 
     AWARDED_STATUSES = {"awarded", "complete", "accepted", "inprogress"}
     CLOSED_STATUSES = {"closed", "cancelled", "expired"}
     WINNER_AWARD_STATUSES = {"awarded", "accepted"}
 
-    for project_id, our_bid_amount, bid_date_str, our_bid_text in recent_bids:
+    for row in recent_bids:
+        project_id = row["project_id"]
         try:
+            # Static data from DB (no API needed)
+            title = row["title"] or f"Project {project_id}"
+            url = row["url"] or f"https://www.freelancer.com/projects/{project_id}"
+            our_amount = row["amount"] or 0
+            our_proposal = row["description"] or ""
+            currency = row["currency"] or "USD"
+            budget_min = row["budget_min"] or 0
+            budget_max = row["budget_max"] or 0
+            bid_date_str = row["created_at"] or ""
+
+            # Format date
+            try:
+                date_obj = datetime.fromisoformat(bid_date_str)
+                date_fmt = date_obj.strftime("%d %b")
+            except Exception:
+                date_fmt = "?"
+
+            # Format budget string
+            if budget_min and budget_max:
+                budget_str = f"{budget_min:.0f}-{budget_max:.0f} {currency}"
+            elif budget_max:
+                budget_str = f"up to {budget_max:.0f} {currency}"
+            else:
+                budget_str = "N/A"
+
+            # API call 1: current project status
             project = project_service.get_project_details(project_id)
             if not project:
-                uninteresting_lines.append(f"• <b>Project {project_id}</b> - <i>Could not fetch details</i>")
-                other_count += 1
+                error_count += 1
                 continue
 
+            # API call 2: bids to find winner
             bids, users = project_service.get_project_bids(project_id)
-            winning_bid = next((b for b in bids if b.get('award_status') in WINNER_AWARD_STATUSES), None)
+            winning_bid = next(
+                (b for b in bids if b.get("award_status") in WINNER_AWARD_STATUSES),
+                None,
+            )
 
-            # Determine outcome
+            # Classify outcome
             outcome = "OPEN"
             winner_amount = 0.0
 
             if winning_bid:
-                winner_amount = winning_bid.get('amount', 0.0)
+                winner_amount = winning_bid.get("amount", 0.0)
 
             if winning_bid and winner_amount > 0:
-                outcome = "LOSS" if winning_bid.get('bidder_id') != my_user_id else "MY_WIN"
+                outcome = "LOSS" if winning_bid.get("bidder_id") != my_user_id else "MY_WIN"
             elif project.status in AWARDED_STATUSES:
-                # Project awarded/in progress but we can't see the winner
-                # Check if any of OUR bids have award status
-                my_bid = next((b for b in bids if b.get('bidder_id') == my_user_id), None)
-                my_award = my_bid.get('award_status', '') if my_bid else ''
+                my_bid = next((b for b in bids if b.get("bidder_id") == my_user_id), None)
+                my_award = my_bid.get("award_status", "") if my_bid else ""
                 if my_award in WINNER_AWARD_STATUSES:
                     outcome = "MY_WIN"
                 else:
-                    outcome = "LOSS_SEALED"  # awarded to someone else, details hidden
+                    outcome = "LOSS_SEALED"
             elif project.status in CLOSED_STATUSES:
                 outcome = "NO_WINNER"
 
-            # Format Date
-            try:
-                date_obj = datetime.fromisoformat(bid_date_str)
-                date_fmt = date_obj.strftime("%d %b %Y")
-            except Exception:
-                date_fmt = bid_date_str
+            base = {"title": title, "url": url, "date": date_fmt, "currency": currency}
 
-            title_link = f"<a href='{project.url}'>{html.escape(project.title)}</a>"
+            if outcome == "MY_WIN":
+                wins.append({**base, "amount": our_amount, "proposal": our_proposal})
+                winning_amounts_usd.append(to_usd(our_amount, currency))
 
-            if outcome == "LOSS":
-                loss_count += 1
-                winner_user = users.get(str(winning_bid.get('bidder_id')), {})
-                winner_country = winner_user.get('location', {}).get('country', {}).get('name', 'N/A')
-                winner_proposal = html.escape(winning_bid.get('description', '')) or '<i>(No text)</i>'
+            elif outcome == "LOSS":
+                winner_user = users.get(str(winning_bid.get("bidder_id")), {})
+                winner_country = (
+                    winner_user.get("location", {})
+                    .get("country", {})
+                    .get("name", "N/A")
+                )
+                winner_proposal = winning_bid.get("description", "") or ""
 
-                msg = f"❌ <b>{title_link}</b>\n"
-                msg += f"Bid placed on: {date_fmt}\n"
-                msg += f"Your Bid: ${our_bid_amount:.2f}\n"
-                msg += f"Winning Bid: ${winner_amount:.2f} ({winner_country})\n"
-                msg += "<blockquote>" + winner_proposal + "</blockquote>"
-                win_loss_messages.append(msg)
-
-            elif outcome == "MY_WIN":
-                win_count += 1
-                msg = f"✅ <b>{title_link}</b>\n"
-                msg += f"Bid placed on: {date_fmt}\n"
-                msg += f"<b>You won! Price: ${our_bid_amount:.2f}</b>\n"
-                msg += "<blockquote>" + html.escape(our_bid_text) + "</blockquote>"
-                win_loss_messages.append(msg)
+                losses_visible.append({
+                    **base,
+                    "budget_str": budget_str,
+                    "our_amount": our_amount,
+                    "our_proposal": our_proposal,
+                    "winner_amount": winner_amount,
+                    "winner_country": winner_country,
+                    "winner_proposal": winner_proposal,
+                })
+                winning_amounts_usd.append(to_usd(winner_amount, currency))
 
             elif outcome == "LOSS_SEALED":
-                loss_count += 1
-                msg = f"❌ <b>{title_link}</b>\n"
-                msg += f"Bid placed on: {date_fmt}\n"
-                msg += f"Your Bid: ${our_bid_amount:.2f}\n"
-                msg += f"<i>Awarded to another freelancer (details hidden)</i>"
-                win_loss_messages.append(msg)
+                losses_sealed.append({
+                    **base,
+                    "budget_str": budget_str,
+                    "our_amount": our_amount,
+                    "our_proposal": our_proposal,
+                })
 
-            else:
-                other_count += 1
-                if outcome == "NO_WINNER":
-                    uninteresting_lines.append(f"🚫 {title_link} - <i>Closed, no winner</i>")
-                else:
-                    uninteresting_lines.append(f"⏳ {title_link} - <i>Active</i>")
+            elif outcome == "NO_WINNER":
+                no_winner.append(base)
+
+            else:  # OPEN
+                active.append(base)
 
         except Exception as e:
             logger.error(f"Error processing bid stats for project {project_id}: {e}")
-            other_count += 1
-            continue
+            error_count += 1
+
+    # Calculate averages (normalize to USD for multi-currency)
+    our_amounts_usd = []
+    for row in recent_bids:
+        amt = row["amount"]
+        cur = row["currency"] or "USD"
+        if amt:
+            our_amounts_usd.append(to_usd(amt, cur))
+    our_avg = sum(our_amounts_usd) / len(our_amounts_usd) if our_amounts_usd else 0
+    avg_winning = sum(winning_amounts_usd) / len(winning_amounts_usd) if winning_amounts_usd else None
 
     return {
-        "uninteresting_lines": uninteresting_lines,
-        "win_loss_messages": win_loss_messages,
-        "win_count": win_count,
-        "loss_count": loss_count,
-        "other_count": other_count,
+        "wins": wins,
+        "losses_visible": losses_visible,
+        "losses_sealed": losses_sealed,
+        "no_winner": no_winner,
+        "active": active,
+        "errors": error_count,
+        "avg_winning_bid": avg_winning,
+        "our_avg_bid": our_avg,
+        "total": len(recent_bids),
     }
 
 
+_MAX_PROPOSAL_LEN = 400
+
+
+def _build_dashboard_message(data: dict) -> str:
+    """Build the dashboard summary message (Message 1)."""
+    total = data["total"]
+    win_count = len(data["wins"])
+    vis_loss = len(data["losses_visible"])
+    seal_loss = len(data["losses_sealed"])
+    total_losses = vis_loss + seal_loss
+    no_winner_count = len(data["no_winner"])
+    active_count = len(data["active"])
+    errors = data["errors"]
+
+    def pct(n):
+        return f"{n / total * 100:.0f}" if total else "0"
+
+    decided = win_count + total_losses
+    if decided:
+        win_rate = f"{win_count / decided * 100:.0f}% ({win_count}/{decided} decided)"
+    else:
+        win_rate = "N/A"
+
+    our_avg = data.get("our_avg_bid", 0)
+    avg_win = data.get("avg_winning_bid")
+
+    lines = [
+        f"📊 <b>BID STATISTICS</b> (last {total} bids)",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"✅ Won: {win_count} ({pct(win_count)}%)",
+        f"❌ Lost: {total_losses} ({pct(total_losses)}%)",
+    ]
+
+    if total_losses > 0:
+        lines.append(f"   ├ visible: {vis_loss}")
+        lines.append(f"   └ sealed: {seal_loss}")
+
+    lines.append(f"🚫 No winner: {no_winner_count} ({pct(no_winner_count)}%)")
+    lines.append(f"⏳ Active: {active_count} ({pct(active_count)}%)")
+
+    if errors:
+        lines.append(f"⚠️ Errors: {errors}")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"💰 Your avg bid: ~${our_avg:.0f}")
+    if avg_win is not None:
+        lines.append(f"💰 Avg winning bid: ~${avg_win:.0f}")
+    lines.append(f"🏆 Win rate: {win_rate}")
+
+    return "\n".join(lines)
+
+
+def _build_loss_card(loss: dict, is_sealed: bool = False) -> str:
+    """Build a single loss analysis card."""
+    title_esc = html.escape(loss["title"])
+    url = loss["url"]
+    title_link = f"<a href='{url}'>{title_esc}</a>"
+    date = loss["date"]
+    budget_str = loss.get("budget_str", "N/A")
+    currency = loss.get("currency", "USD")
+
+    our_amount = loss.get("our_amount", 0)
+    our_proposal = html.escape(loss.get("our_proposal", ""))
+    if len(our_proposal) > _MAX_PROPOSAL_LEN:
+        our_proposal = our_proposal[:_MAX_PROPOSAL_LEN] + "..."
+
+    lines = [
+        f"❌ <b>{title_link}</b>",
+        f"📅 {date} | Budget: {budget_str}",
+        "",
+        f"🙋 Your bid: {our_amount:.0f} {currency}",
+    ]
+
+    if our_proposal:
+        lines.append(f"<blockquote>{our_proposal}</blockquote>")
+
+    if is_sealed:
+        lines.append("")
+        lines.append("🔒 <i>Awarded to another (details hidden)</i>")
+    else:
+        winner_amount = loss.get("winner_amount", 0)
+        winner_country = loss.get("winner_country", "N/A")
+        winner_proposal = html.escape(loss.get("winner_proposal", ""))
+        if len(winner_proposal) > _MAX_PROPOSAL_LEN:
+            winner_proposal = winner_proposal[:_MAX_PROPOSAL_LEN] + "..."
+
+        lines.append("")
+        lines.append(f"🏆 Winner: {winner_amount:.0f} {currency} · {html.escape(winner_country)}")
+        if winner_proposal:
+            lines.append(f"<blockquote>{winner_proposal}</blockquote>")
+        else:
+            lines.append("<i>(No proposal text visible)</i>")
+
+    return "\n".join(lines)
+
+
+def _build_compact_summary(data: dict) -> str:
+    """Build compact wins + active + closed summary (Message 3)."""
+    lines = []
+
+    if data["wins"]:
+        lines.append(f"✅ <b>WINS ({len(data['wins'])})</b>")
+        for w in data["wins"]:
+            title_esc = html.escape(w["title"][:60])
+            currency = w.get("currency", "USD")
+            lines.append(f"• <a href='{w['url']}'>{title_esc}</a> — {w['amount']:.0f} {currency}")
+        lines.append("")
+
+    if data["active"]:
+        lines.append(f"⏳ <b>ACTIVE ({len(data['active'])})</b>")
+        for a in data["active"]:
+            title_esc = html.escape(a["title"][:60])
+            lines.append(f"• <a href='{a['url']}'>{title_esc}</a>")
+        lines.append("")
+
+    if data["no_winner"]:
+        lines.append(f"🚫 <b>CLOSED — NO WINNER ({len(data['no_winner'])})</b>")
+        for c in data["no_winner"]:
+            title_esc = html.escape(c["title"][:60])
+            lines.append(f"• <a href='{c['url']}'>{title_esc}</a>")
+
+    return "\n".join(lines)
+
+
 async def cmd_bid_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /bidstats command."""
+    """Handle /bidstats command — dashboard + loss analysis + compact summary."""
     await update.message.reply_text("⏳ Fetching bid statistics, please wait...")
 
     repo = ProjectRepository()
-    recent_bids = repo.get_recent_bids(limit=25)
+    recent_bids = repo.get_recent_bids_full(limit=25)
 
     if not recent_bids:
         await update.message.reply_text("No recent successful bids found.")
         return
 
     try:
-        # Run blocking API calls in thread pool
         import asyncio
         loop = asyncio.get_event_loop()
         data = await loop.run_in_executor(None, _fetch_bid_stats_sync, recent_bids)
 
-        uninteresting_lines = data["uninteresting_lines"]
-        win_loss_messages = data["win_loss_messages"]
-        win_count = data["win_count"]
-        loss_count = data["loss_count"]
-        other_count = data["other_count"]
+        # Message 1: Dashboard Summary
+        dashboard = _build_dashboard_message(data)
+        await update.message.reply_text(dashboard, parse_mode="HTML")
 
-        # Send results: detailed wins/losses first, then pending
-        if win_loss_messages:
-            for msg in win_loss_messages:
-                try:
-                    await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
-                except telegram_error.TelegramError as e:
-                    logger.error(f"Failed to send stats card: {e}")
-
-        if uninteresting_lines:
-            uninteresting_message = "📊 <b>Pending / Closed</b>\n\n" + "\n".join(uninteresting_lines)
-            await send_in_chunks(update, uninteresting_message, max_length=2000)
-
-        summary_message = (
-            "🏁 <b>Summary</b>\n"
-            f"Reviewed: {len(recent_bids)}\n"
-            f"✅ Won: {win_count}\n"
-            f"❌ Lost: {loss_count}\n"
-            f"⏳ Pending: {other_count}"
+        # Message 2: Loss Analysis Cards (one per loss)
+        all_losses = (
+            [(loss, False) for loss in data["losses_visible"]]
+            + [(loss, True) for loss in data["losses_sealed"]]
         )
-        await update.message.reply_text(summary_message, parse_mode="HTML")
+
+        if all_losses:
+            for loss, is_sealed in all_losses:
+                try:
+                    card = _build_loss_card(loss, is_sealed=is_sealed)
+                    await update.message.reply_text(
+                        card, parse_mode="HTML", disable_web_page_preview=True
+                    )
+                except telegram_error.TelegramError as e:
+                    logger.error(f"Failed to send loss card: {e}")
+
+        # Message 3: Wins + Active + Closed (compact)
+        compact = _build_compact_summary(data)
+        if compact:
+            await send_in_chunks(update, compact, max_length=4000)
 
     except Exception as e:
-        logger.error(f"Error in /bidstats: {e}")
+        logger.error(f"Error in /bidstats: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Error fetching bid stats: {e}")
 
 

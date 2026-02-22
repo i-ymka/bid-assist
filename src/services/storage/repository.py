@@ -436,6 +436,30 @@ class ProjectRepository:
             logger.error(f"Failed to get recent bids: {e}")
             return []
 
+    def get_recent_bids_full(self, limit: int = 25):
+        """Get recent successful bids with ALL stored columns.
+
+        Returns sqlite3.Row objects with keys:
+            project_id, amount, period, description, created_at,
+            title, summary, url, currency, bid_count,
+            budget_min, budget_max, client_country, avg_bid
+        """
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("""
+                SELECT project_id, amount, period, description, created_at,
+                       title, summary, url, currency, bid_count,
+                       budget_min, budget_max, client_country, avg_bid
+                FROM bid_history
+                WHERE success = 1
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (limit,))
+            return cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.error(f"Failed to get recent bids (full): {e}")
+            return []
+
     def get_processed_count(self, since: str = None) -> int:
         """Get count of processed projects.
 
