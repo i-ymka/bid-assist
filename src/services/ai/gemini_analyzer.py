@@ -1,7 +1,10 @@
 """Gemini CLI-based project analyzer.
 
-Uses the locally installed Gemini CLI to analyze projects
-according to pal_rules.md and return structured verdicts.
+Two-call architecture:
+  Call 1 (analysis_model): analyze.md  → VERDICT / DAYS / SUMMARY
+  Call 2 (bid_model):      bid_writer.md → BID text
+
+Pricing is computed deterministically in _calculate_amount(), not by AI.
 """
 
 import logging
@@ -16,89 +19,36 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Path to pal_rules.md
-RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "pal_rules.md"
+# Prompt paths
+ANALYSIS_RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "analyze.md"
+BID_WRITER_RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "bid_writer.md"
 
-# Model fallback chain: primary → fallbacks in order
-FALLBACK_MODELS = ["gemini-2.5-pro", "gemini-2.0-flash"]
+# Fallback chains (primary model comes from settings)
+ANALYSIS_FALLBACK_MODELS = ["gemini-3-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-2.5-pro"]
+BID_FALLBACK_MODELS = ["gemini-3-flash-preview", "gemini-flash-latest", "gemini-2.0-flash"]
+
 _cooldowns: dict[str, float] = {}  # model -> timestamp when it can be retried
 
 
 @dataclass
 class AnalysisResult:
     """Result of project analysis."""
-    verdict: str  # "BID" or "SKIP"
+    verdict: str   # "BID" or "SKIP"
     summary: str
     bid_text: str
     amount: float
-    period: int
+    period: int    # working days
     raw_response: str
 
 
-def load_rules() -> str:
-    """Load the PAL rules from file."""
-    if RULES_PATH.exists():
-        return RULES_PATH.read_text()
-    else:
-        logger.warning(f"Rules file not found at {RULES_PATH}")
-        return ""
-
-
-def parse_response(response: str) -> Optional[AnalysisResult]:
-    """Parse Gemini response into structured result.
-
-    Expected format:
-    VERDICT: BID or SKIP
-    ---
-    SUMMARY: ...
-    ---
-    BID: ...
-    ---
-    AMOUNT: 150
-    ---
-    PERIOD: 3
-    """
-    try:
-        if "===RESULT===" in response:
-            response = response.split("===RESULT===")[1]
-
-        # Extract each field using regex
-        verdict_match = re.search(r"VERDICT:\s*(BID|SKIP)", response, re.IGNORECASE)
-        summary_match = re.search(r"SUMMARY:\s*(.+?)(?=\n---|\nBID:|\Z)", response, re.DOTALL | re.IGNORECASE)
-        bid_match = re.search(r"BID:\s*(.+?)(?=\n---|\nAMOUNT:|\Z)", response, re.DOTALL | re.IGNORECASE)
-        amount_match = re.search(r"AMOUNT:\s*(\d+(?:\.\d+)?)", response, re.IGNORECASE)
-        period_match = re.search(r"PERIOD:\s*(\d+)", response, re.IGNORECASE)
-
-        if not verdict_match:
-            logger.error("Could not find VERDICT in response")
-            return None
-
-        verdict = verdict_match.group(1).upper()
-        summary = summary_match.group(1).strip() if summary_match else ""
-        bid_text = bid_match.group(1).strip() if bid_match else ""
-        amount = float(amount_match.group(1)) if amount_match else 0
-        period = int(period_match.group(1)) if period_match else 0
-
-        return AnalysisResult(
-            verdict=verdict,
-            summary=summary,
-            bid_text=bid_text,
-            amount=amount,
-            period=period,
-            raw_response=response,
-        )
-
-    except Exception as e:
-        logger.error(f"Failed to parse response: {e}")
-        return None
+def _load_prompt(path: Path) -> str:
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    logger.warning(f"Prompt file not found: {path}")
+    return ""
 
 
 def _classify_cli_error(stderr: str) -> str:
-    """Classify CLI error into a short category.
-
-    Returns:
-        'capacity' for 429 errors, 'cancelled' for user interrupt, 'unknown' otherwise.
-    """
     lower = stderr.lower()
     if "429" in lower or "capacity" in lower or "rate limit" in lower or "resource_exhausted" in lower:
         return "capacity"
@@ -108,15 +58,11 @@ def _classify_cli_error(stderr: str) -> str:
 
 
 def _extract_clean_error(stderr: str) -> str:
-    """Extract a short human-readable error from Gemini CLI stderr."""
-    # Look for the "message" field in JSON error
     msg_match = re.search(r'"message":\s*"([^"]+)"', stderr)
     if msg_match:
         return msg_match.group(1)
-    # Look for "Operation cancelled"
     if "Operation cancelled" in stderr:
         return "Operation cancelled (interrupted)"
-    # Fallback: first non-empty line that isn't boilerplate
     for line in stderr.strip().split("\n"):
         line = line.strip()
         if line and not line.startswith(("Loaded cached", "YOLO mode", "Attempt", "    at ")):
@@ -124,18 +70,25 @@ def _extract_clean_error(stderr: str) -> str:
     return stderr[:200]
 
 
-def _run_gemini_cli(prompt: str, model: str, timeout: int = 600) -> Optional[str]:
+def _run_gemini_cli(
+    prompt: str,
+    model: str,
+    fallback_models: list[str],
+    timeout: int = 600,
+) -> Optional[str]:
     """Run Gemini CLI with automatic model fallback chain on 429 errors.
 
-    Builds a chain: primary → fallback1 → fallback2.
-    Each model that hits 429 gets a 5-minute cooldown.
+    Args:
+        prompt: Full prompt text
+        model: Primary model to use
+        fallback_models: Ordered list of fallback models if primary fails
+        timeout: Subprocess timeout in seconds
 
     Returns:
         CLI stdout text, or None if all attempts failed.
     """
-    # Build model chain: primary + fallbacks (skip duplicates, skip cooled-down)
     now = time.time()
-    all_models = [model] + [m for m in FALLBACK_MODELS if m != model]
+    all_models = [model] + [m for m in fallback_models if m != model]
     models_to_try = []
     for m in all_models:
         cooldown_until = _cooldowns.get(m, 0)
@@ -146,12 +99,12 @@ def _run_gemini_cli(prompt: str, model: str, timeout: int = 600) -> Optional[str
             models_to_try.append(m)
 
     if not models_to_try:
-        logger.error("All models are on cooldown, cannot analyze")
+        logger.error("All models are on cooldown, cannot run")
         return None
 
     for current_model in models_to_try:
         try:
-            logger.info(f"Running Gemini CLI with model: {current_model}")
+            logger.info(f"Running Gemini CLI: {current_model}")
             result = subprocess.run(
                 ["gemini", "-m", current_model, "--yolo", "-p", prompt],
                 capture_output=True,
@@ -159,7 +112,6 @@ def _run_gemini_cli(prompt: str, model: str, timeout: int = 600) -> Optional[str
                 timeout=timeout,
             )
 
-            # Negative return code = killed by signal (e.g. Ctrl+C sends SIGINT = -2)
             if result.returncode < 0:
                 logger.info(f"Gemini CLI killed by signal {-result.returncode}")
                 return None
@@ -170,28 +122,24 @@ def _run_gemini_cli(prompt: str, model: str, timeout: int = 600) -> Optional[str
 
                 if error_type == "capacity":
                     logger.warning(f"Model {current_model}: 429 — {clean_msg}")
-                    _cooldowns[current_model] = time.time() + 300  # 5 min cooldown
-                    next_models = [m for m in models_to_try if m != current_model and models_to_try.index(m) > models_to_try.index(current_model)]
-                    if next_models:
-                        logger.info(f"Falling back to {next_models[0]}, will retry {current_model} in 5 min")
+                    _cooldowns[current_model] = time.time() + 300
                     continue
                 elif error_type == "cancelled":
-                    logger.info(f"Gemini CLI interrupted (Ctrl+C)")
+                    logger.info("Gemini CLI interrupted (Ctrl+C)")
                     return None
                 else:
                     logger.error(f"Gemini CLI failed ({current_model}): {clean_msg}")
                     return None
 
-            # Success — clear cooldown
             _cooldowns.pop(current_model, None)
 
             response = result.stdout.strip()
-            # Clean Gemini CLI boilerplate from output
-            for boilerplate in ["Loaded cached credentials.", "YOLO mode is enabled. All tool calls will be automatically approved."]:
+            for boilerplate in [
+                "Loaded cached credentials.",
+                "YOLO mode is enabled. All tool calls will be automatically approved.",
+            ]:
                 response = response.replace(boilerplate, "")
-            response = response.strip()
-
-            return response
+            return response.strip()
 
         except subprocess.TimeoutExpired:
             logger.error(f"Gemini CLI timed out ({current_model}, {timeout}s)")
@@ -200,137 +148,272 @@ def _run_gemini_cli(prompt: str, model: str, timeout: int = 600) -> Optional[str
     return None
 
 
-def analyze_project(
+def analyze_feasibility(
     project_id: int,
     title: str,
     description: str,
-    budget: str,
-    avg_bid: float = None,
-    bid_count: int = None,
-    model: str = None,
-) -> Optional[AnalysisResult]:
-    """Analyze a project using Gemini CLI.
+    budget_str: str,
+    avg_bid_usd: float,
+    bid_count: int,
+) -> Optional[dict]:
+    """Call 1: Analyze project feasibility.
 
-    Args:
-        project_id: Freelancer project ID
-        title: Project title
-        description: Full project description
-        budget: Budget string like "$100 - $250 USD"
-        avg_bid: Average bid amount on this project
-        bid_count: Number of bids on this project
-        model: Gemini model to use
-
-    Returns:
-        AnalysisResult or None if analysis failed
+    Returns dict with keys: verdict ('PASS'/'SKIP'), days (int), summary (str).
+    Returns None if the call failed entirely.
     """
-    model = model or settings.gemini_model
-    rules = load_rules()
-
-    # Format avg_bid string for prompt
-    avg_bid_str = f"{avg_bid:.0f}" if avg_bid else "No bids yet"
-    bid_count_str = str(bid_count) if bid_count else "0"
+    rules = _load_prompt(ANALYSIS_RULES_PATH)
+    avg_bid_str = f"{avg_bid_usd:.0f}" if avg_bid_usd else "No bids yet"
 
     prompt = f"""{rules}
 
 ---
 
-CRITICAL REMINDERS:
-1. Write your bid like a human texting - plain conversational text, no special formatting. Follow the ONE GOLDEN EXAMPLE.
-2. Your training data is from 2025. Use google_web_search to verify current versions of AI models, APIs, frameworks, services.
-
-Now analyze this project. Follow ALL rules at the top of the prompt.
+Now analyze this project. Follow ALL rules above.
 
 PROJECT ID: {project_id}
 TITLE: {title}
-BUDGET: {budget}
+BUDGET: {budget_str}
 AVERAGE BID: {avg_bid_str}
-BID COUNT: {bid_count_str}
+BID COUNT: {bid_count}
 
 DESCRIPTION:
 {description}
 
 ---
 
-First, write a "THOUGHTS:" section with your step-by-step reasoning (Risk, Tech, Budget).
-Then, output the marker "===RESULT===" followed by the exact format specified (VERDICT, SUMMARY, BID, AMOUNT, PERIOD).
-If the verdict is BID, end the bid with a question. If something is unclear in the project - ask about it. If the project is clear and well-described - ask when they are ready to start (e.g. "I'm free now, when do you want to begin?").
+Write your THOUGHTS first (Risk check, Tech check, Red Zone check, Day estimate).
+Then output ===RESULT=== and the structured result.
 """
 
-    logger.info(f"Analyzing project {project_id}: {title[:50]}...")
-
-    response = _run_gemini_cli(prompt, model)
+    logger.info(f"[Call 1] Analyzing feasibility: {title[:50]}...")
+    response = _run_gemini_cli(prompt, settings.gemini_model, ANALYSIS_FALLBACK_MODELS)
     if not response:
         return None
 
-    logger.debug(f"Raw Gemini response:\n{response}")
+    logger.debug(f"[Call 1] Raw response:\n{response}")
 
-    parsed = parse_response(response)
-    if parsed:
-        logger.info(f"Project {project_id} verdict: {parsed.verdict}")
+    # Parse ===RESULT=== block
+    if "===RESULT===" in response:
+        result_block = response.split("===RESULT===")[1]
+    else:
+        result_block = response
 
-    return parsed
+    verdict_match = re.search(r"VERDICT:\s*(PASS|SKIP)", result_block, re.IGNORECASE)
+    days_match = re.search(r"DAYS:\s*(\d+)", result_block, re.IGNORECASE)
+    summary_match = re.search(r"SUMMARY:\s*(.+?)(?=\nVERDICT:|\nDAYS:|\Z)", result_block, re.DOTALL | re.IGNORECASE)
+
+    if not verdict_match:
+        # Try to detect BID/SKIP from old format (graceful degradation)
+        old_verdict = re.search(r"VERDICT:\s*(BID|SKIP)", result_block, re.IGNORECASE)
+        if old_verdict:
+            verdict_raw = old_verdict.group(1).upper()
+            verdict = "PASS" if verdict_raw == "BID" else "SKIP"
+        else:
+            logger.error(f"[Call 1] Could not find VERDICT in response for project {project_id}")
+            return None
+    else:
+        verdict = verdict_match.group(1).upper()
+
+    days = int(days_match.group(1)) if days_match else 1
+    summary = summary_match.group(1).strip() if summary_match else ""
+
+    logger.info(f"[Call 1] Project {project_id}: VERDICT={verdict}, DAYS={days}")
+    return {"verdict": verdict, "days": days, "summary": summary}
+
+
+def _calculate_amount(
+    days: int,
+    avg_bid_usd: float,
+    budget_max_usd: float,
+    min_daily_rate: int = 100,
+) -> float:
+    """Deterministic pricing formula.
+
+    Args:
+        days: Estimated working days
+        avg_bid_usd: Average bid on the project in USD (0 if none)
+        budget_max_usd: Client's max budget in USD
+        min_daily_rate: Minimum USD per day (default 100)
+
+    Returns:
+        Bid amount in USD, rounded to nearest $10.
+    """
+    floor = days * min_daily_rate
+
+    if avg_bid_usd and avg_bid_usd > 0:
+        target = avg_bid_usd * 0.90       # 10% below average bid
+    else:
+        target = (budget_max_usd or 0) * 0.75  # 75% of max budget if no avg
+
+    raw = max(floor, target)
+    return round(raw / 10) * 10
+
+
+def write_bid(
+    project_id: int,
+    title: str,
+    description: str,
+    summary: str,
+    amount: float,
+    period: int,
+) -> Optional[str]:
+    """Call 2: Write bid text for a project that passed feasibility.
+
+    Args:
+        summary: SUMMARY from Call 1 (context for the bid writer)
+        amount: Pre-calculated bid amount (DO NOT mention in bid text)
+        period: Working days (DO NOT mention in bid text)
+
+    Returns:
+        Bid text string, or None if the call failed.
+    """
+    rules = _load_prompt(BID_WRITER_RULES_PATH)
+
+    prompt = f"""{rules}
+
+---
+
+Write a bid for this project. Follow ALL rules above.
+
+PROJECT TITLE: {title}
+
+PROJECT DESCRIPTION:
+{description}
+
+ANALYSIS SUMMARY (context for you, do NOT copy verbatim):
+{summary}
+
+YOUR BID AMOUNT: ${amount:.0f} — DO NOT mention this number in the bid text
+DELIVERY: {period} day(s) — DO NOT mention this in the bid text
+
+---
+
+Output ONLY the BID: line. No other text.
+"""
+
+    logger.info(f"[Call 2] Writing bid for project {project_id}...")
+    response = _run_gemini_cli(prompt, settings.bid_model, BID_FALLBACK_MODELS)
+    if not response:
+        return None
+
+    logger.debug(f"[Call 2] Raw response:\n{response}")
+
+    bid_match = re.search(r"BID:\s*(.+?)(?:\Z)", response, re.DOTALL | re.IGNORECASE)
+    if not bid_match:
+        # Treat entire response as bid text if no BID: marker
+        bid_text = response.strip()
+    else:
+        bid_text = bid_match.group(1).strip()
+
+    if not bid_text:
+        logger.error(f"[Call 2] Empty bid text for project {project_id}")
+        return None
+
+    return bid_text
+
+
+def analyze_project(
+    project_id: int,
+    title: str,
+    description: str,
+    budget_str: str,
+    avg_bid_usd: float,
+    bid_count: int,
+    budget_max_usd: float = 0,
+    min_daily_rate: int = 100,
+) -> Optional[AnalysisResult]:
+    """Orchestrate the two-call analysis pipeline.
+
+    Call 1: analyze_feasibility → VERDICT / DAYS / SUMMARY
+    Code:   _calculate_amount → AMOUNT
+    Call 2: write_bid → BID text
+
+    Returns AnalysisResult or None if a call failed.
+    """
+    # --- Call 1: Feasibility ---
+    feasibility = analyze_feasibility(
+        project_id, title, description, budget_str, avg_bid_usd, bid_count
+    )
+    if not feasibility:
+        return None
+
+    if feasibility["verdict"] == "SKIP":
+        return AnalysisResult(
+            verdict="SKIP",
+            summary=feasibility["summary"],
+            bid_text="",
+            amount=0,
+            period=0,
+            raw_response="",
+        )
+
+    # --- Pricing (deterministic) ---
+    days = max(feasibility["days"], 1)
+    amount = _calculate_amount(days, avg_bid_usd, budget_max_usd, min_daily_rate)
+
+    # --- Call 2: Bid writing ---
+    bid_text = write_bid(
+        project_id, title, description,
+        feasibility["summary"], amount, days,
+    )
+    if not bid_text:
+        logger.error(f"Bid writing failed for project {project_id}")
+        return None
+
+    return AnalysisResult(
+        verdict="BID",
+        summary=feasibility["summary"],
+        bid_text=bid_text,
+        amount=amount,
+        period=days,
+        raw_response="",
+    )
 
 
 def force_bid_analysis(
     project_id: int,
     title: str,
     description: str,
-    budget: str,
-    avg_bid: float = None,
-    bid_count: int = None,
-    model: str = None,
+    budget_str: str,
+    avg_bid_usd: float,
+    bid_count: int,
+    budget_max_usd: float = 0,
+    min_daily_rate: int = 100,
 ) -> Optional[AnalysisResult]:
-    """Force generate a bid for a project (skip verdict, always BID).
+    """Force generate a bid regardless of SKIP verdict (user clicked 'Ask for Bid').
 
-    Use this when user clicks "Ask for Bid" on a skipped project.
+    Runs Call 1 to get DAYS (ignores SKIP verdict), then calculates amount and writes bid.
     """
-    model = model or settings.gemini_model
-    rules = load_rules()
+    # Call 1 to get day estimate (ignore SKIP verdict)
+    feasibility = analyze_feasibility(
+        project_id, title, description, budget_str, avg_bid_usd, bid_count
+    )
+    if feasibility:
+        days = max(feasibility["days"], 1)
+        summary = feasibility["summary"]
+    else:
+        # Fallback if Call 1 failed
+        days = settings.default_bid_period
+        summary = ""
+        logger.warning(f"Force bid: Call 1 failed for {project_id}, using default period={days}")
 
-    # Format avg_bid string for prompt
-    avg_bid_str = f"{avg_bid:.0f}" if avg_bid else "No bids yet"
-    bid_count_str = str(bid_count) if bid_count else "0"
+    # Pricing
+    amount = _calculate_amount(days, avg_bid_usd, budget_max_usd, min_daily_rate)
 
-    prompt = f"""{rules}
-
----
-
-CRITICAL REMINDERS:
-1. Write your bid like a human texting - plain conversational text, no special formatting. Follow the ONE GOLDEN EXAMPLE.
-2. Your training data is from 2025. Use google_web_search to verify current versions of AI models, APIs, frameworks, services.
-
-The user has decided to bid on this project despite previous SKIP recommendation.
-Your task: Generate a BID for this project. Do NOT skip. VERDICT must be BID.
-
-PROJECT ID: {project_id}
-TITLE: {title}
-BUDGET: {budget}
-AVERAGE BID: {avg_bid_str}
-BID COUNT: {bid_count_str}
-
-DESCRIPTION:
-{description}
-
----
-
-Generate a bid. VERDICT must be BID. Follow bid writing rules from instructions above.
-First, write a "THOUGHTS:" section with your step-by-step reasoning.
-Then, output the marker "===RESULT===" followed by the exact format specified (VERDICT, SUMMARY, BID, AMOUNT, PERIOD).
-End the bid with a question. If something is unclear - ask about it. If everything is clear - ask when they are ready to start.
-"""
-
-    logger.info(f"Force-generating bid for project {project_id}: {title[:50]}...")
-
-    response = _run_gemini_cli(prompt, model)
-    if not response:
+    # Call 2: write bid
+    bid_text = write_bid(
+        project_id, title, description, summary, amount, days,
+    )
+    if not bid_text:
+        logger.error(f"Force bid: Call 2 failed for project {project_id}")
         return None
 
-    logger.debug(f"Raw Gemini response:\n{response}")
-
-    parsed = parse_response(response)
-    if parsed:
-        # Force verdict to BID in case AI still returned SKIP
-        parsed.verdict = "BID"
-        logger.info(f"Force bid for project {project_id}: amount={parsed.amount}")
-
-    return parsed
+    logger.info(f"Force bid for project {project_id}: amount={amount}, period={days}")
+    return AnalysisResult(
+        verdict="BID",
+        summary=summary,
+        bid_text=bid_text,
+        amount=amount,
+        period=days,
+        raw_response="",
+    )

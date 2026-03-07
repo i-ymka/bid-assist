@@ -165,6 +165,10 @@ class ProjectRepository:
                     INSERT OR IGNORE INTO runtime_settings (key, value)
                     VALUES ('budget_max', '1000')
                 """)
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO runtime_settings (key, value)
+                    VALUES ('min_daily_rate', '100')
+                """)
 
                 # User settings table (multi-user support)
                 self._conn.execute("""
@@ -1161,6 +1165,34 @@ class ProjectRepository:
             return True
         except sqlite3.Error as e:
             logger.error(f"Failed to set budget range: {e}")
+            return False
+
+    def get_min_daily_rate(self) -> int:
+        """Get the minimum daily rate in USD from runtime settings."""
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'min_daily_rate'"
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row else 100
+        except (sqlite3.Error, ValueError) as e:
+            logger.error(f"Failed to get min_daily_rate: {e}")
+            return 100
+
+    def set_min_daily_rate(self, rate: int) -> bool:
+        """Set the minimum daily rate in USD in runtime settings."""
+        try:
+            with self._conn:
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO runtime_settings (key, value, updated_at)
+                       VALUES ('min_daily_rate', ?, CURRENT_TIMESTAMP)""",
+                    (str(rate),),
+                )
+            logger.info(f"Min daily rate set to ${rate}/day")
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to set min_daily_rate: {e}")
             return False
 
     def is_verified(self) -> bool:

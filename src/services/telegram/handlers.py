@@ -909,6 +909,9 @@ _BUDGET_PRESETS = [
 # Poll interval presets (seconds)
 _POLL_PRESETS = [60, 120, 180, 300, 600]
 
+# Min daily rate presets (USD/day)
+_DAILY_RATE_PRESETS = [50, 75, 100, 125, 150, 200]
+
 
 def _build_settings_message(repo: ProjectRepository) -> str:
     """Build the settings message text."""
@@ -922,6 +925,7 @@ def _build_settings_message(repo: ProjectRepository) -> str:
     auto_bid_status = "✅ Yes" if repo.is_auto_bid() else "❌ No"
     skipped_status = "✅ Yes" if repo.get_receive_skipped() else "❌ No"
 
+    min_daily_rate = repo.get_min_daily_rate()
     return (
         f"⚙️ <b>Settings</b>\n\n"
         f"<b>Filters:</b>\n"
@@ -933,7 +937,8 @@ def _build_settings_message(repo: ProjectRepository) -> str:
         f"• Crypto (verified account): {crypto_status}\n"
         f"• Preferred-only: {preferred_status}\n\n"
         f"<b>Bidding:</b>\n"
-        f"• Auto-bid: {auto_bid_status}\n\n"
+        f"• Auto-bid: {auto_bid_status}\n"
+        f"• Min daily rate: ${min_daily_rate}/day\n\n"
         f"<b>Notifications:</b>\n"
         f"• Show skipped: {skipped_status}"
     )
@@ -948,6 +953,7 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
     auto_bid_yn = "✅ Yes" if repo.is_auto_bid() else "❌ No"
     skipped_yn = "✅ Yes" if repo.get_receive_skipped() else "❌ No"
 
+    min_daily_rate = repo.get_min_daily_rate()
     keyboard = [
         [
             InlineKeyboardButton(f"💰 Budget: ${state['min_budget']}–${state['max_budget']}", callback_data="settings:budget"),
@@ -959,6 +965,9 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(f"Auto-bid: {auto_bid_yn}", callback_data="settings:auto_bid"),
+            InlineKeyboardButton(f"Min rate: ${min_daily_rate}/day", callback_data="settings:daily_rate"),
+        ],
+        [
             InlineKeyboardButton(f"Skipped: {skipped_yn}", callback_data="settings:skip_notif"),
         ],
     ]
@@ -1032,6 +1041,20 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         except ValueError:
             next_idx = 0
         repo.set_poll_interval(_POLL_PRESETS[next_idx])
+
+        message = _build_settings_message(repo)
+        keyboard = _get_settings_keyboard(repo)
+        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
+
+    elif action == "daily_rate":
+        # Cycle through daily rate presets
+        current = repo.get_min_daily_rate()
+        try:
+            idx = _DAILY_RATE_PRESETS.index(current)
+            next_idx = (idx + 1) % len(_DAILY_RATE_PRESETS)
+        except ValueError:
+            next_idx = 0
+        repo.set_min_daily_rate(_DAILY_RATE_PRESETS[next_idx])
 
         message = _build_settings_message(repo)
         keyboard = _get_settings_keyboard(repo)
@@ -1388,6 +1411,8 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
     else:
         budget_str = "Not specified"
 
+    min_daily_rate = repo.get_min_daily_rate()
+
     # Run analysis in thread pool (it's blocking)
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
@@ -1399,6 +1424,8 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
         budget_str,
         avg_bid_usd,
         bid_count,
+        budget_max_usd,
+        min_daily_rate,
     )
 
     if not result:

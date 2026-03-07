@@ -285,6 +285,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                 budget_str = "Not specified"
 
             # Run Gemini analysis (blocking, run in thread pool)
+            min_daily_rate = repo.get_min_daily_rate()
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
@@ -295,6 +296,8 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                 budget_str,
                 avg_bid_usd,
                 bid_count,
+                budget_max_usd,
+                min_daily_rate,
             )
 
             if not result:
@@ -303,39 +306,11 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                 # Don't add to processed — next poll cycle will retry if project still passes filters
                 continue
 
-            # Convert AI's USD amount back to project currency
+            # Convert code-calculated USD amount to project currency
             if currency != "USD" and result.verdict == "BID" and result.amount > 0:
                 original_usd = result.amount
                 result.amount = round_up_10(from_usd(result.amount, currency))
                 logger.info(f"Amount conversion: {original_usd:.0f} USD → {result.amount} {currency}")
-
-            # Guardrail: reject nonsense BID outputs (amount=0 or period=0)
-            if result.verdict == "BID" and (result.amount <= 0 or result.period <= 0):
-                logger.warning(
-                    f"GUARDRAIL: AI returned BID with amount={result.amount}, period={result.period} "
-                    f"for project {project_id}. Overriding BID → SKIP."
-                )
-                result.verdict = "SKIP"
-                result.summary += " [Auto-skipped: invalid amount/period from AI]"
-
-            # Guardrail: enforce minimum daily rate (AI sometimes ignores the prompt rule)
-            if result.verdict == "BID" and result.period > 0 and settings.min_daily_rate > 0:
-                # For non-USD projects, compare in USD (amount was converted above, convert back for check)
-                check_amount = result.amount
-                if currency != "USD":
-                    check_amount = to_usd(result.amount, currency)
-                min_amount = result.period * settings.min_daily_rate
-                if check_amount < min_amount:
-                    logger.warning(
-                        f"GUARDRAIL: AI bid ${check_amount:.0f} for {result.period} days is below "
-                        f"minimum daily rate (${settings.min_daily_rate}/day = ${min_amount}). "
-                        f"Overriding BID → SKIP for project {project_id}."
-                    )
-                    result.verdict = "SKIP"
-                    result.summary += (
-                        f" [Auto-skipped: ${check_amount:.0f} < ${min_amount} minimum "
-                        f"({result.period}d × ${settings.min_daily_rate}/d)]"
-                    )
 
             # Mark as processed
             repo.mark_queue_status(project_id, "processed")
