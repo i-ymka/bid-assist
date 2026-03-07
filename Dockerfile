@@ -17,4 +17,4 @@ COPY . .
 ENV PYTHONPATH=/app
 
 # Run the application
-CMD ["python", "-m", "src.app"]
+CMD ["python", "run.py"]

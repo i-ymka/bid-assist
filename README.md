@@ -5,11 +5,11 @@ Automated Freelancer project discovery and bidding bot with AI-powered analysis.
 ## Features
 
 - **Automatic Project Discovery** - Monitors Freelancer.com for new projects matching your skills
-- **Smart Filtering** - Filters by skills, budget range, and blacklisted keywords
-- **AI Analysis** - Uses OpenAI to analyze project complexity and generate personalized bid proposals
-- **One-Click Bidding** - Place bids with a single button click in Telegram
-- **Telegram Notifications** - Sends project alerts with AI summaries and bid proposals
-- **Telegram Commands** - Control the bot via Telegram commands
+- **Smart Filtering** - Filters by skills, budget, country, currency, language, blacklist, project age
+- **AI Analysis** - Uses Google Gemini to analyze projects and generate personalized bid proposals
+- **Auto-Bidding** - Fully automatic bid placement or one-click manual mode via Telegram
+- **Telegram Bot** - Notifications with interactive buttons, live settings, bid statistics
+- **Currency Conversion** - Automatic conversion to/from USD for 65+ currencies
 
 ## Quick Start
 
@@ -37,7 +37,7 @@ docker-compose up -d
 
 ```bash
 pip install -r requirements.txt
-python -m src.app
+python run.py
 ```
 
 ## Configuration
@@ -49,73 +49,54 @@ See `.env.example` for all available options. Key settings:
 | `FREELANCER_OAUTH_TOKEN` | Your Freelancer OAuth token |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather |
 | `TELEGRAM_CHAT_IDS` | Comma-separated chat IDs |
-| `OPENAI_API_KEY` | OpenAI API key |
+| `GEMINI_API_KEY` | Google Gemini API key |
+| `GEMINI_MODEL` | Gemini model (default: gemini-3.1-pro-preview) |
 | `SKILL_IDS` | Freelancer skill IDs to monitor |
-| `MIN_BUDGET` / `MAX_BUDGET` | Budget range filter |
+| `BLOCKED_COUNTRIES` | Countries to skip (comma-separated) |
+| `BL` | Blacklist keywords (comma-separated) |
+
+Budget range, poll interval, and auto-bid mode are configured via `/settings` in Telegram.
 
 ## How It Works
 
 ```
-1. POLL        → Fetch new projects from Freelancer (every 5 min)
-2. FILTER      → Apply skill, budget, and blacklist filters
-3. AI ANALYZE  → Get difficulty rating, summary, and bid proposal
+1. POLL        → Fetch new projects from Freelancer API
+2. FILTER      → Apply skill, budget, country, blacklist, currency, language filters
+3. AI ANALYZE  → Gemini analyzes project, generates summary and bid proposal
 4. NOTIFY      → Send Telegram message with "Place Bid" button
-5. YOU CLICK   → Bot places bid on Freelancer
+5. BID         → Auto-bid or manual one-click placement
 ```
 
 ## Telegram Commands
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Show welcome message |
-| `/status` | Show current status and statistics |
-| `/setbudget <min> <max>` | Change budget range |
-| `/pause` | Pause project monitoring |
-| `/resume` | Resume monitoring |
-| `/stats` | Show bid statistics |
-
-## Example Notification
-
-When the bot finds a matching project, you'll receive:
-
-```
-**Python Web Scraper for E-commerce**
-
-📝 Summary: Client needs a simple scraper to extract
-product prices from 3 websites. Straightforward job.
-
-💰 Budget: 50 - 150 USD
-💵 Suggested Bid: $120
-📅 Suggested Period: 5 days
-
-🔗 Project link:
-https://www.freelancer.com/projects/12345
-
-👇 Bid Proposal:
-┌─────────────────────────────────────
-│ Hi, I'm YourName, expert in Python...
-└─────────────────────────────────────
-
-#EASY
-
-[ 💰 Place Bid ($120) ]   ← Click to bid!
-```
+| `/status` | Bot status + control buttons (pause/resume/auto-bid) |
+| `/settings` | Configure budget, poll interval, filters |
+| `/bidstats` | Bid history with win/loss classification |
+| `/help` | Show available commands |
 
 ## Project Structure
 
 ```
 bid-assist/
+├── run.py                  # Entry point (polling + analysis + Telegram bot)
+├── prompts/
+│   └── pal_rules.md        # AI prompt rules for Gemini
 ├── src/
-│   ├── app.py              # Main application entry point
-│   ├── config/             # Settings and constants
-│   ├── core/               # Exceptions
-│   ├── filters/            # Project filtering logic
-│   ├── models/             # Data models (Project, Bid, etc.)
+│   ├── config/             # Settings (pydantic-settings) and API constants
+│   ├── core/               # Exception hierarchy
+│   ├── models/             # Data models (Project, Bid, AIAnalysis)
+│   ├── filters/            # Filtering pipeline (skill, budget, country, blacklist)
 │   └── services/
-│       ├── ai/             # OpenAI integration
-│       ├── freelancer/     # Freelancer API client
-│       ├── storage/        # SQLite repository
-│       └── telegram/       # Bot, handlers, notifications
+│       ├── ai/             # Gemini CLI integration
+│       ├── freelancer/     # Freelancer API client, projects, bidding
+│       ├── storage/        # SQLite repository (7 tables)
+│       ├── telegram/       # Bot handlers and notification formatting
+│       └── currency.py     # Currency conversion (60+ currencies)
+├── docs/                   # Project documentation
+├── data/                   # Runtime data (SQLite DB)
+├── logs/                   # Application logs
 ├── tests/                  # Unit tests
 ├── .env.example            # Environment template
 ├── docker-compose.yml      # Docker configuration
@@ -125,9 +106,10 @@ bid-assist/
 
 ## Safety
 
-- Bids are only placed when **you click the button**
+- **Manual mode**: Bids placed only when you click the button
+- **Auto-bid mode**: Fully automatic, can be toggled via `/settings`
 - All bid attempts are logged in the database
-- Budget limits prevent showing out-of-range projects
+- Budget and country filters prevent unwanted projects
 
 ## License
 

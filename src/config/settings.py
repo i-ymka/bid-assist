@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     telegram_chat_ids_raw: str = Field("", alias="TELEGRAM_CHAT_IDS")
 
     # Gemini CLI model (fallback chain handled in gemini_analyzer.py)
-    gemini_model: str = Field("gemini-3-pro-preview", alias="GEMINI_MODEL")
+    gemini_model: str = Field("gemini-2.5-pro", alias="GEMINI_MODEL")
 
     # Filtering Settings
     blacklist_raw: str = Field("", alias="BL")
@@ -46,9 +46,10 @@ class Settings(BaseSettings):
     # Bid Settings
     default_bid_period: int = Field(3, alias="DEFAULT_BID_PERIOD")
     default_milestone_pct: int = Field(100, alias="DEFAULT_MILESTONE_PCT")
+    min_daily_rate: int = Field(50, alias="MIN_DAILY_RATE")
 
     # Database
-    db_path: str = Field("processed_projects.db", alias="DB_PATH")
+    db_path: str = Field("data/processed_projects.db", alias="DB_PATH")
 
     class Config:
         env_file = ".env"

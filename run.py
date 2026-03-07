@@ -36,7 +36,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("bot_debug.log"),
+        logging.FileHandler("logs/bot_debug.log"),
         logging.StreamHandler()
     ]
 )
@@ -77,8 +77,10 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 min_budget=50,  # Default: $50 (actual filter in BudgetFilter uses runtime settings)
             )
 
-            # Initialize filters
-            budget_filter = BudgetFilter()
+            # Initialize filters (budget range is read from DB each cycle — user can change it live)
+            budget_min, budget_max = repo.get_budget_range()
+            logger.info(f"Budget filter: ${budget_min}-${budget_max}")
+            budget_filter = BudgetFilter(min_budget=budget_min, max_budget=budget_max)
             blacklist_filter = BlacklistFilter()
             country_filter = CountryFilter()
 
@@ -240,6 +242,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
     logger.info("Analysis loop started")
 
     while not shutdown_event.is_set():
+        project_id = None  # Reset each iteration so except block can check if a project was in-flight
         try:
             # Check if paused
             if repo.is_paused():
@@ -305,6 +308,34 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                 original_usd = result.amount
                 result.amount = round_up_10(from_usd(result.amount, currency))
                 logger.info(f"Amount conversion: {original_usd:.0f} USD → {result.amount} {currency}")
+
+            # Guardrail: reject nonsense BID outputs (amount=0 or period=0)
+            if result.verdict == "BID" and (result.amount <= 0 or result.period <= 0):
+                logger.warning(
+                    f"GUARDRAIL: AI returned BID with amount={result.amount}, period={result.period} "
+                    f"for project {project_id}. Overriding BID → SKIP."
+                )
+                result.verdict = "SKIP"
+                result.summary += " [Auto-skipped: invalid amount/period from AI]"
+
+            # Guardrail: enforce minimum daily rate (AI sometimes ignores the prompt rule)
+            if result.verdict == "BID" and result.period > 0 and settings.min_daily_rate > 0:
+                # For non-USD projects, compare in USD (amount was converted above, convert back for check)
+                check_amount = result.amount
+                if currency != "USD":
+                    check_amount = to_usd(result.amount, currency)
+                min_amount = result.period * settings.min_daily_rate
+                if check_amount < min_amount:
+                    logger.warning(
+                        f"GUARDRAIL: AI bid ${check_amount:.0f} for {result.period} days is below "
+                        f"minimum daily rate (${settings.min_daily_rate}/day = ${min_amount}). "
+                        f"Overriding BID → SKIP for project {project_id}."
+                    )
+                    result.verdict = "SKIP"
+                    result.summary += (
+                        f" [Auto-skipped: ${check_amount:.0f} < ${min_amount} minimum "
+                        f"({result.period}d × ${settings.min_daily_rate}/d)]"
+                    )
 
             # Mark as processed
             repo.mark_queue_status(project_id, "processed")
@@ -529,7 +560,12 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                     logger.info(f"SKIP notification muted for {project_id}")
 
         except Exception as e:
-            logger.error(f"Analysis error: {e}")
+            logger.error(f"Analysis error: {e}", exc_info=True)
+            # If a project was mid-analysis, remove it so the next poll cycle can re-queue it.
+            # Without this, the project stays frozen in 'analyzing' state forever.
+            if project_id:
+                repo.remove_from_queue(project_id)
+                logger.warning(f"Removed project {project_id} from queue after analysis exception")
             await asyncio.sleep(10)
 
 

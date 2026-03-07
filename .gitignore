@@ -41,17 +41,27 @@ ENV/
 # SQLite databases
 *.db
 *.sqlite3
-data/
 
-# Logs
-logs/
-*.log
+# Runtime data and logs (keep dirs via .gitkeep)
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# ================================================================
+# Project docs and prompts (internal, not for repo)
+# ================================================================
+docs/
+prompts/*
+!prompts/pal_rules.md.example
 
 # ================================================================
 # IDE and editor files
 # ================================================================
 .idea/
 .vscode/
+.cursor/
+.claude/
 *.swp
 *.swo
 *~

@@ -17,10 +17,10 @@ from src.config import settings
 logger = logging.getLogger(__name__)
 
 # Path to pal_rules.md
-RULES_PATH = Path(__file__).parent.parent.parent.parent / "pal_rules.md"
+RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "pal_rules.md"
 
 # Model fallback chain: primary → fallbacks in order
-FALLBACK_MODELS = ["gemini-2.5-pro"]
+FALLBACK_MODELS = ["gemini-2.5-pro", "gemini-2.0-flash"]
 _cooldowns: dict[str, float] = {}  # model -> timestamp when it can be retried
 
 

@@ -299,6 +299,51 @@ class BiddingService:
             logger.error(f"Error fetching user's bids: {e}")
             return set()
 
+    def get_all_my_bids(self) -> list:
+        """Fetch ALL bids by the authenticated user with project details (paginated).
+
+        Returns list of bid dicts, each enriched with '_project' key.
+        """
+        bidder_id = self._get_bidder_id()
+        all_bids = []
+        offset = 0
+        page_size = 100
+
+        while True:
+            try:
+                response = self._client.get(
+                    BIDS_ENDPOINT,
+                    params={
+                        "bidders[]": bidder_id,
+                        "limit": page_size,
+                        "offset": offset,
+                        "project_details": "true",
+                    },
+                )
+            except Exception as e:
+                logger.error(f"Failed to fetch bids at offset {offset}: {e}")
+                break
+
+            if response.get("status") != "success":
+                logger.warning(f"Non-success fetching bids at offset {offset}")
+                break
+
+            result = response.get("result", {})
+            bids = result.get("bids", [])
+            projects = result.get("projects", {})
+
+            for bid in bids:
+                pid = str(bid.get("project_id"))
+                bid["_project"] = projects.get(pid, {})
+                all_bids.append(bid)
+
+            if len(bids) < page_size:
+                break
+            offset += page_size
+
+        logger.info(f"Fetched {len(all_bids)} total bids from Freelancer API")
+        return all_bids
+
     def has_bid_on_project(self, project_id: int) -> bool:
         """Check if user has already bid on a specific project.
 

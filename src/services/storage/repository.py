@@ -156,6 +156,15 @@ class ProjectRepository:
                     INSERT OR IGNORE INTO runtime_settings (key, value)
                     VALUES ('total_projects_seen', '0')
                 """)
+                # Seed budget filter defaults (INSERT OR IGNORE — won't overwrite user's values)
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO runtime_settings (key, value)
+                    VALUES ('budget_min', '50')
+                """)
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO runtime_settings (key, value)
+                    VALUES ('budget_max', '1000')
+                """)
 
                 # User settings table (multi-user support)
                 self._conn.execute("""
@@ -205,6 +214,34 @@ class ProjectRepository:
                     self._conn.execute("ALTER TABLE project_queue ADD COLUMN skill_names TEXT")
                 except sqlite3.OperationalError:
                     pass  # Column already exists
+
+                # Add outcome column to bid_history for caching win/loss classification
+                try:
+                    self._conn.execute("ALTER TABLE bid_history ADD COLUMN outcome TEXT")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+
+                # bid_outcomes — caches outcome for ALL bids (bot + manual)
+                self._conn.execute("""
+                    CREATE TABLE IF NOT EXISTS bid_outcomes (
+                        project_id INTEGER PRIMARY KEY,
+                        outcome TEXT NOT NULL,
+                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        winner_amount REAL,
+                        winner_proposal_len INTEGER,
+                        winner_reviews INTEGER
+                    )
+                """)
+                # Add winner comparison columns to existing bid_outcomes rows (migration)
+                for _col, _coltype in [
+                    ("winner_amount", "REAL"),
+                    ("winner_proposal_len", "INTEGER"),
+                    ("winner_reviews", "INTEGER"),
+                ]:
+                    try:
+                        self._conn.execute(f"ALTER TABLE bid_outcomes ADD COLUMN {_col} {_coltype}")
+                    except sqlite3.OperationalError:
+                        pass  # Column already exists
             logger.debug("Database tables initialized")
         except sqlite3.Error as e:
             logger.error(f"Failed to create tables: {e}")
@@ -436,29 +473,151 @@ class ProjectRepository:
             logger.error(f"Failed to get recent bids: {e}")
             return []
 
-    def get_recent_bids_full(self, limit: int = 25):
+    def get_recent_bids_full(self, limit: int = None, since: str = None):
         """Get recent successful bids with ALL stored columns.
 
-        Returns sqlite3.Row objects with keys:
-            project_id, amount, period, description, created_at,
-            title, summary, url, currency, bid_count,
-            budget_min, budget_max, client_country, avg_bid
+        Args:
+            limit: Max rows (None = all).
+            since: ISO timestamp — only bids after this date.
+
+        Returns sqlite3.Row objects.
         """
         try:
             cursor = self._conn.cursor()
-            cursor.execute("""
+            conditions = ["success = 1"]
+            params = []
+            if since:
+                conditions.append("created_at >= ?")
+                params.append(since)
+            where = " AND ".join(conditions)
+            sql = f"""
                 SELECT project_id, amount, period, description, created_at,
                        title, summary, url, currency, bid_count,
-                       budget_min, budget_max, client_country, avg_bid
+                       budget_min, budget_max, client_country, avg_bid, outcome
                 FROM bid_history
-                WHERE success = 1
+                WHERE {where}
                 ORDER BY created_at DESC
-                LIMIT ?
-            """, (limit,))
+            """
+            if limit:
+                sql += " LIMIT ?"
+                params.append(limit)
+            cursor.execute(sql, params)
             return cursor.fetchall()
         except sqlite3.Error as e:
             logger.error(f"Failed to get recent bids (full): {e}")
             return []
+
+    def update_bid_outcome(self, project_id: int, outcome: str) -> bool:
+        """Cache the win/loss outcome for a bid."""
+        try:
+            self._conn.execute(
+                "UPDATE bid_history SET outcome = ? WHERE project_id = ? AND success = 1",
+                (outcome, project_id),
+            )
+            self._conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to update outcome for {project_id}: {e}")
+            return False
+
+    def get_outcome_summary(self, since: str = None) -> dict:
+        """Get cached outcome counts from bid_history.
+
+        Returns dict: {outcome_value: count, ...} e.g. {'LOSS': 5, 'OPEN': 12, ...}
+        """
+        try:
+            cursor = self._conn.cursor()
+            if since:
+                cursor.execute("""
+                    SELECT outcome, COUNT(*) as cnt
+                    FROM bid_history
+                    WHERE success = 1 AND created_at >= ?
+                    GROUP BY outcome
+                """, (since,))
+            else:
+                cursor.execute("""
+                    SELECT outcome, COUNT(*) as cnt
+                    FROM bid_history
+                    WHERE success = 1
+                    GROUP BY outcome
+                """)
+            return {row["outcome"]: row["cnt"] for row in cursor.fetchall()}
+        except sqlite3.Error as e:
+            logger.error(f"Failed to get outcome summary: {e}")
+            return {}
+
+    def get_bid_outcome(self, project_id: int) -> str | None:
+        """Get cached outcome string from bid_outcomes table."""
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT outcome FROM bid_outcomes WHERE project_id = ?",
+                (project_id,),
+            )
+            row = cursor.fetchone()
+            return row["outcome"] if row else None
+        except sqlite3.Error:
+            return None
+
+    def get_bid_outcome_full(self, project_id: int) -> dict | None:
+        """Get cached outcome plus winner comparison data from bid_outcomes.
+
+        Returns:
+            Dict with keys: outcome, winner_amount, winner_proposal_len, winner_reviews.
+            None if no row found.
+        """
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """SELECT outcome, winner_amount, winner_proposal_len, winner_reviews
+                   FROM bid_outcomes WHERE project_id = ?""",
+                (project_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "outcome": row["outcome"],
+                "winner_amount": row["winner_amount"],
+                "winner_proposal_len": row["winner_proposal_len"],
+                "winner_reviews": row["winner_reviews"],
+            }
+        except sqlite3.Error:
+            return None
+
+    def set_bid_outcome(self, project_id: int, outcome: str, winner_detail: dict = None):
+        """Cache outcome in bid_outcomes table (upsert). Optionally persist winner comparison data.
+
+        Args:
+            project_id: Freelancer project ID.
+            outcome: Outcome string ("LOSS", "MY_WIN", "NO_WINNER", "LOSS_SEALED", "ERROR").
+            winner_detail: Dict with keys winner_amount, winner_proposal, winner_profile (for LOSS).
+                           winner_proposal_len is derived from len(winner_proposal).
+        """
+        try:
+            winner_amount = None
+            winner_proposal_len = None
+            winner_reviews = None
+            if winner_detail:
+                winner_amount = winner_detail.get("winner_amount")
+                proposal = winner_detail.get("winner_proposal") or ""
+                winner_proposal_len = len(proposal) if proposal else None
+                winner_reviews = (winner_detail.get("winner_profile") or {}).get("reviews")
+            self._conn.execute(
+                """INSERT INTO bid_outcomes
+                       (project_id, outcome, updated_at, winner_amount, winner_proposal_len, winner_reviews)
+                   VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?)
+                   ON CONFLICT(project_id) DO UPDATE SET
+                       outcome = excluded.outcome,
+                       updated_at = excluded.updated_at,
+                       winner_amount = COALESCE(excluded.winner_amount, winner_amount),
+                       winner_proposal_len = COALESCE(excluded.winner_proposal_len, winner_proposal_len),
+                       winner_reviews = COALESCE(excluded.winner_reviews, winner_reviews)""",
+                (project_id, outcome, winner_amount, winner_proposal_len, winner_reviews),
+            )
+            self._conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Failed to set bid outcome for {project_id}: {e}")
 
     def get_processed_count(self, since: str = None) -> int:
         """Get count of processed projects.
@@ -834,10 +993,10 @@ class ProjectRepository:
         try:
             cursor = self._conn.cursor()
 
-            # Get old project IDs from queue
+            # Get old pending items AND stuck 'analyzing' items (exception left them frozen)
             cursor.execute("""
                 SELECT project_id FROM project_queue
-                WHERE status = 'pending'
+                WHERE status IN ('pending', 'analyzing')
                 AND fetched_at < datetime('now', ? || ' hours')
             """, (f"-{max_age_hours}",))
             old_project_ids = [row[0] for row in cursor.fetchall()]
@@ -962,6 +1121,46 @@ class ProjectRepository:
             return True
         except sqlite3.Error as e:
             logger.error(f"Failed to set poll interval: {e}")
+            return False
+
+    def get_budget_range(self) -> tuple[int, int]:
+        """Get the budget filter range (min, max) from runtime settings."""
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'budget_min'"
+            )
+            row_min = cursor.fetchone()
+            cursor.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'budget_max'"
+            )
+            row_max = cursor.fetchone()
+            return (
+                int(row_min[0]) if row_min else 50,
+                int(row_max[0]) if row_max else 3000,
+            )
+        except (sqlite3.Error, ValueError) as e:
+            logger.error(f"Failed to get budget range: {e}")
+            return (50, 3000)
+
+    def set_budget_range(self, min_budget: int, max_budget: int) -> bool:
+        """Set the budget filter range in runtime settings."""
+        try:
+            with self._conn:
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO runtime_settings (key, value, updated_at)
+                       VALUES ('budget_min', ?, CURRENT_TIMESTAMP)""",
+                    (str(min_budget),),
+                )
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO runtime_settings (key, value, updated_at)
+                       VALUES ('budget_max', ?, CURRENT_TIMESTAMP)""",
+                    (str(max_budget),),
+                )
+            logger.info(f"Budget range set to ${min_budget}-${max_budget}")
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to set budget range: {e}")
             return False
 
     def is_verified(self) -> bool:
@@ -1345,7 +1544,7 @@ class ProjectRepository:
             return False
 
     def set_bot_start_time(self) -> bool:
-        """Record when the bot started."""
+        """Record when the bot started. Stored as UTC to match SQLite CURRENT_TIMESTAMP."""
         try:
             with self._conn:
                 self._conn.execute(
@@ -1353,7 +1552,7 @@ class ProjectRepository:
                     INSERT OR REPLACE INTO runtime_settings (key, value, updated_at)
                     VALUES ('bot_start_time', ?, CURRENT_TIMESTAMP)
                     """,
-                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
+                    (datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),),
                 )
             return True
         except sqlite3.Error as e:

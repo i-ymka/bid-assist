@@ -1,7 +1,7 @@
 """Telegram command and callback handlers."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import html
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram import error as telegram_error
@@ -28,12 +28,19 @@ logger = logging.getLogger(__name__)
 WAITING_AMOUNT, WAITING_TEXT = range(2)
 
 # Runtime state (shared across handlers)
-# Budget can be changed via /setbudget command
+# Budget is persisted in runtime_settings DB; load stored values at import time.
 _runtime_state = {
     "paused": False,
     "min_budget": 50,  # Default: $50
     "max_budget": 3000,  # Default: $3000
 }
+try:
+    _init_repo = ProjectRepository()
+    _bmin, _bmax = _init_repo.get_budget_range()
+    _runtime_state["min_budget"] = _bmin
+    _runtime_state["max_budget"] = _bmax
+except Exception:
+    pass  # DB not ready yet — will use defaults
 
 # Singleton bidding service
 _bidding_service = None
@@ -105,7 +112,7 @@ def _build_status_message(repo: ProjectRepository) -> str:
     if bot_start:
         try:
             start_time = datetime.fromisoformat(bot_start)
-            uptime_seconds = int((datetime.now() - start_time).total_seconds())
+            uptime_seconds = int((datetime.utcnow() - start_time).total_seconds())
             hours = uptime_seconds // 3600
             minutes = (uptime_seconds % 3600) // 60
             if hours > 0:
@@ -193,6 +200,7 @@ async def cmd_setbudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         _runtime_state["min_budget"] = min_budget
         _runtime_state["max_budget"] = max_budget
+        ProjectRepository().set_budget_range(min_budget, max_budget)
 
         await update.message.reply_text(
             f"✅ Budget range updated: ${min_budget} - ${max_budget}"
@@ -303,19 +311,122 @@ async def send_in_chunks(update: Update, text: str, max_length: int = 4096):
         )
 
 
-def _fetch_bid_stats_sync(recent_bids: list) -> dict:
-    """Fetch bid stats data synchronously (runs in thread pool).
+_AWARDED_STATUSES = {"awarded", "complete", "accepted", "inprogress"}
+_CLOSED_STATUSES = {"closed", "cancelled", "expired"}
+_WINNER_AWARD_STATUSES = {"awarded", "accepted"}
+# Outcomes that are final (don't need re-checking)
+_FINAL_OUTCOMES = {"MY_WIN", "LOSS", "LOSS_SEALED", "NO_WINNER", "ERROR"}
 
-    Takes sqlite3.Row objects from get_recent_bids_full().
-    Uses DB data for static fields, API only for current status + winner info.
 
-    Returns dict with structured data for dashboard + loss cards + compact summary.
+def _classify_project(project_id, project_service, client, my_user_id):
+    """Classify a single project's outcome via API. Returns (outcome, detail_dict or None)."""
+    project = project_service.get_project_details(project_id)
+    if not project:
+        return None, None
+
+    bids, users = project_service.get_project_bids(project_id)
+    winning_bid = next(
+        (b for b in bids if b.get("award_status") in _WINNER_AWARD_STATUSES),
+        None,
+    )
+
+    outcome = "OPEN"
+    detail = None
+
+    if winning_bid:
+        winner_amount = winning_bid.get("amount", 0.0)
+        if winning_bid.get("bidder_id") == my_user_id:
+            outcome = "MY_WIN"
+        elif winner_amount > 0:
+            outcome = "LOSS"
+            # Fetch winner profile
+            winner_profile = {}
+            try:
+                resp = client.get(
+                    f"/users/0.1/users/{winning_bid['bidder_id']}/",
+                    params={"reputation": "true", "country_details": "true"},
+                )
+                wr = resp.get("result", {})
+                if wr:
+                    rep = wr.get("reputation", {}).get("entire_history", {})
+                    loc = wr.get("location", {})
+                    winner_profile = {
+                        "username": wr.get("username", ""),
+                        "country": loc.get("country", {}).get("name", "N/A") if loc else "N/A",
+                        "rating": rep.get("overall"),
+                        "reviews": rep.get("reviews"),
+                        "completion_rate": rep.get("completion_rate"),
+                    }
+            except Exception as e:
+                logger.warning(f"Could not fetch winner profile: {e}")
+            detail = {
+                "winner_amount": winner_amount,
+                "winner_profile": winner_profile,
+                "winner_proposal": winning_bid.get("description", "") or "",
+            }
+        else:
+            outcome = "LOSS_SEALED"
+    elif project.status in _AWARDED_STATUSES:
+        my_bid = next((b for b in bids if b.get("bidder_id") == my_user_id), None)
+        my_award = my_bid.get("award_status", "") if my_bid else ""
+        if my_award in _WINNER_AWARD_STATUSES:
+            outcome = "MY_WIN"
+        else:
+            outcome = "LOSS_SEALED"
+    elif project.status in _CLOSED_STATUSES:
+        outcome = "NO_WINNER"
+
+    return outcome, detail
+
+
+_stats_cache = {"data": None, "ts": None}
+_STATS_CACHE_TTL = 1800  # 30 minutes
+
+
+def _fetch_bid_stats_sync() -> dict:
+    """Fetch ALL user bids from Freelancer API, classify, build stats.
+
+    Uses in-memory cache (30 min) + DB outcome cache.
+    Source: Freelancer API (includes manual bids), NOT bid_history.
     """
-    from src.services.currency import to_usd
+    now = datetime.now()
+    if (
+        _stats_cache["data"] is not None
+        and _stats_cache["ts"]
+        and (now - _stats_cache["ts"]).total_seconds() < _STATS_CACHE_TTL
+    ):
+        logger.info("Bidstats: returning cached result (age: %ds)", int((now - _stats_cache["ts"]).total_seconds()))
+        return _stats_cache["data"]
 
+    bidding_service = get_bidding_service()
     project_service = ProjectService()
     client = FreelancerClient()
     my_user_id = client.get_user_id()
+    repo = ProjectRepository()
+
+    # Fetch my own profile once
+    my_profile = {}
+    try:
+        resp = client.get(
+            f"/users/0.1/users/{my_user_id}/",
+            params={"reputation": "true", "country_details": "true"},
+        )
+        mr = resp.get("result", {})
+        if mr:
+            rep = mr.get("reputation", {}).get("entire_history", {})
+            loc = mr.get("location", {})
+            my_profile = {
+                "username": mr.get("username", ""),
+                "country": loc.get("country", {}).get("name", "N/A") if loc else "N/A",
+                "rating": rep.get("overall"),
+                "reviews": rep.get("reviews"),
+                "completion_rate": rep.get("completion_rate"),
+            }
+    except Exception as e:
+        logger.warning(f"Could not fetch own profile: {e}")
+
+    # Fetch ALL bids from Freelancer API (paginated, includes manual bids)
+    api_bids = bidding_service.get_all_my_bids()
 
     wins = []
     losses_visible = []
@@ -323,31 +434,38 @@ def _fetch_bid_stats_sync(recent_bids: list) -> dict:
     no_winner = []
     active = []
     error_count = 0
-    winning_amounts_usd = []
+    classify_calls = 0
 
-    AWARDED_STATUSES = {"awarded", "complete", "accepted", "inprogress"}
-    CLOSED_STATUSES = {"closed", "cancelled", "expired"}
-    WINNER_AWARD_STATUSES = {"awarded", "accepted"}
-
-    for row in recent_bids:
-        project_id = row["project_id"]
+    for bid in api_bids:
+        project_id = bid.get("project_id")
+        if not project_id:
+            continue
         try:
-            # Static data from DB (no API needed)
-            title = row["title"] or f"Project {project_id}"
-            url = row["url"] or f"https://www.freelancer.com/projects/{project_id}"
-            our_amount = row["amount"] or 0
-            our_proposal = row["description"] or ""
-            currency = row["currency"] or "USD"
-            budget_min = row["budget_min"] or 0
-            budget_max = row["budget_max"] or 0
-            bid_date_str = row["created_at"] or ""
+            # Data from API bid object
+            our_amount = bid.get("amount", 0) or 0
+            our_proposal = bid.get("description", "") or ""
+            submit_ts = bid.get("submitdate", 0)
+            award_status = bid.get("award_status", "")
 
-            # Format date
+            # Project details from embedded _project (via project_details=true)
+            proj = bid.get("_project", {})
+            title = proj.get("title") or f"Project {project_id}"
+            seo_url = proj.get("seo_url", "")
+            url = f"https://www.freelancer.com/projects/{seo_url}" if seo_url else f"https://www.freelancer.com/projects/{project_id}"
+            currency_obj = proj.get("currency", {})
+            currency = currency_obj.get("code", "USD") if currency_obj else "USD"
+            budget = proj.get("budget", {}) or {}
+            budget_min = budget.get("minimum", 0) or 0
+            budget_max = budget.get("maximum", 0) or 0
+
+            # Format date from unix timestamp
             try:
-                date_obj = datetime.fromisoformat(bid_date_str)
+                date_obj = datetime.fromtimestamp(submit_ts)
                 date_fmt = date_obj.strftime("%d %b")
+                date_iso = date_obj.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 date_fmt = "?"
+                date_iso = ""
 
             # Format budget string
             if budget_min and budget_max:
@@ -357,183 +475,194 @@ def _fetch_bid_stats_sync(recent_bids: list) -> dict:
             else:
                 budget_str = "N/A"
 
-            # API call 1: current project status
-            project = project_service.get_project_details(project_id)
-            if not project:
-                error_count += 1
+            base = {"title": title, "url": url, "date": date_fmt, "currency": currency, "created_at_raw": date_iso}
+
+            # Fast path: award_status tells us if WE won
+            if award_status in _WINNER_AWARD_STATUSES:
+                wins.append({**base, "amount": our_amount, "proposal": our_proposal})
+                repo.set_bid_outcome(project_id, "MY_WIN")
                 continue
 
-            # API call 2: bids to find winner
-            bids, users = project_service.get_project_bids(project_id)
-            winning_bid = next(
-                (b for b in bids if b.get("award_status") in WINNER_AWARD_STATUSES),
-                None,
-            )
+            # Check DB cache
+            cached_row = repo.get_bid_outcome_full(project_id)
+            detail = None
 
-            # Classify outcome
-            outcome = "OPEN"
-            winner_amount = 0.0
-
-            if winning_bid:
-                winner_amount = winning_bid.get("amount", 0.0)
-
-            if winning_bid:
-                # Awarded bid exists — someone won
-                if winning_bid.get("bidder_id") == my_user_id:
-                    outcome = "MY_WIN"
-                elif winner_amount > 0:
-                    outcome = "LOSS"  # visible winner with amount
-                else:
-                    outcome = "LOSS_SEALED"  # winner exists but amount hidden (0.0)
-            elif project.status in AWARDED_STATUSES:
-                # No awarded bid visible but project is in progress
-                my_bid = next((b for b in bids if b.get("bidder_id") == my_user_id), None)
-                my_award = my_bid.get("award_status", "") if my_bid else ""
-                if my_award in WINNER_AWARD_STATUSES:
-                    outcome = "MY_WIN"
-                else:
-                    outcome = "LOSS_SEALED"
-            elif project.status in CLOSED_STATUSES:
-                outcome = "NO_WINNER"
-
-            base = {"title": title, "url": url, "date": date_fmt, "currency": currency}
+            if cached_row and cached_row["outcome"] in _FINAL_OUTCOMES:
+                cached_outcome = cached_row["outcome"]
+                if cached_outcome == "ERROR":
+                    error_count += 1
+                    continue
+                outcome = cached_outcome
+                # For LOSS: load or backfill winner comparison data for accurate averages.
+                # Without this, comparison metrics are computed only over freshly-classified
+                # losses (tiny non-representative sample) → wildly inconsistent numbers.
+                if outcome == "LOSS":
+                    ca = cached_row.get("winner_amount")
+                    cpl = cached_row.get("winner_proposal_len")
+                    cr = cached_row.get("winner_reviews")
+                    if ca is not None or cpl is not None or cr is not None:
+                        # Reconstruct a detail-compatible dict from cached values.
+                        # winner_proposal is a placeholder of the correct length (metrics need length, not text).
+                        detail = {
+                            "winner_amount": ca or 0,
+                            "winner_proposal": "x" * (cpl or 0),
+                            "winner_profile": {"reviews": cr},
+                        }
+                    else:
+                        # No winner data yet (rows classified before this fix) — re-classify once to backfill.
+                        _, fresh_detail = _classify_project(project_id, project_service, client, my_user_id)
+                        classify_calls += 1
+                        if fresh_detail:
+                            repo.set_bid_outcome(project_id, "LOSS", fresh_detail)
+                            detail = fresh_detail
+            elif bid.get("frontend_bid_status") == "active":
+                # Still active — skip API call
+                outcome = "OPEN"
+            else:
+                # Closed, not won by us — need API to determine LOSS vs SEALED vs NO_WINNER
+                outcome, detail = _classify_project(project_id, project_service, client, my_user_id)
+                classify_calls += 1
+                if outcome is None:
+                    error_count += 1
+                    repo.set_bid_outcome(project_id, "ERROR")
+                    continue
+                repo.set_bid_outcome(project_id, outcome, detail)
 
             if outcome == "MY_WIN":
                 wins.append({**base, "amount": our_amount, "proposal": our_proposal})
-                winning_amounts_usd.append(to_usd(our_amount, currency))
-
             elif outcome == "LOSS":
-                winner_proposal = winning_bid.get("description", "") or ""
-                winner_bidder_id = winning_bid.get("bidder_id")
-
-                # API call 3: fetch winner's profile (rating, reviews, country)
-                winner_profile = {}
-                try:
-                    resp = client.get(
-                        f"/users/0.1/users/{winner_bidder_id}/",
-                        params={"reputation": "true", "country_details": "true"},
-                    )
-                    wr = resp.get("result", {})
-                    if wr:
-                        rep = wr.get("reputation", {}).get("entire_history", {})
-                        loc = wr.get("location", {})
-                        winner_profile = {
-                            "username": wr.get("username", ""),
-                            "country": loc.get("country", {}).get("name", "N/A") if loc else "N/A",
-                            "rating": rep.get("overall"),
-                            "reviews": rep.get("reviews"),
-                            "completion_rate": rep.get("completion_rate"),
-                        }
-                except Exception as e:
-                    logger.warning(f"Could not fetch winner profile {winner_bidder_id}: {e}")
-
-                losses_visible.append({
-                    **base,
-                    "budget_str": budget_str,
-                    "our_amount": our_amount,
-                    "our_proposal": our_proposal,
-                    "winner_amount": winner_amount,
-                    "winner_profile": winner_profile,
-                    "winner_proposal": winner_proposal,
-                })
-                winning_amounts_usd.append(to_usd(winner_amount, currency))
-
+                entry = {**base, "budget_str": budget_str, "our_amount": our_amount, "our_proposal": our_proposal}
+                if detail:
+                    entry.update(detail)
+                losses_visible.append(entry)
             elif outcome == "LOSS_SEALED":
-                losses_sealed.append({
-                    **base,
-                    "budget_str": budget_str,
-                    "our_amount": our_amount,
-                    "our_proposal": our_proposal,
-                })
-
+                losses_sealed.append({**base, "budget_str": budget_str, "our_amount": our_amount, "our_proposal": our_proposal})
             elif outcome == "NO_WINNER":
                 no_winner.append(base)
-
-            else:  # OPEN
+            else:
                 active.append(base)
 
         except Exception as e:
             logger.error(f"Error processing bid stats for project {project_id}: {e}")
             error_count += 1
 
-    # Calculate averages (normalize to USD for multi-currency)
-    our_amounts_usd = []
-    for row in recent_bids:
-        amt = row["amount"]
-        cur = row["currency"] or "USD"
-        if amt:
-            our_amounts_usd.append(to_usd(amt, cur))
-    our_avg = sum(our_amounts_usd) / len(our_amounts_usd) if our_amounts_usd else 0
-    avg_winning = sum(winning_amounts_usd) / len(winning_amounts_usd) if winning_amounts_usd else None
+    # Comparison metrics (visible losses with winner data)
+    price_diffs_pct = []
+    proposal_diffs = []
+    review_diffs = []
+    my_reviews = my_profile.get("reviews")
 
-    return {
+    for loss in losses_visible:
+        winner_amount = loss.get("winner_amount", 0)
+        if winner_amount > 0 and loss.get("our_amount", 0) > 0:
+            price_diffs_pct.append((loss["our_amount"] / winner_amount - 1) * 100)
+
+        our_len = len(loss.get("our_proposal", ""))
+        winner_len = len(loss.get("winner_proposal", ""))
+        if our_len > 0 or winner_len > 0:
+            proposal_diffs.append(our_len - winner_len)
+
+        winner_reviews = (loss.get("winner_profile") or {}).get("reviews")
+        if winner_reviews is not None and my_reviews is not None:
+            review_diffs.append(my_reviews - winner_reviews)
+
+    comparison = {}
+    if price_diffs_pct:
+        comparison["avg_price_diff_pct"] = sum(price_diffs_pct) / len(price_diffs_pct)
+    if proposal_diffs:
+        comparison["avg_proposal_diff_chars"] = sum(proposal_diffs) / len(proposal_diffs)
+    if review_diffs:
+        comparison["avg_review_diff"] = sum(review_diffs) / len(review_diffs)
+
+    logger.info(f"Bidstats: {len(api_bids)} bids, {classify_calls} classify calls, {error_count} errors")
+
+    result = {
         "wins": wins,
         "losses_visible": losses_visible,
         "losses_sealed": losses_sealed,
         "no_winner": no_winner,
         "active": active,
         "errors": error_count,
-        "avg_winning_bid": avg_winning,
-        "our_avg_bid": our_avg,
-        "total": len(recent_bids),
+        "comparison": comparison,
+        "my_profile": my_profile,
+        "total": len(api_bids),
     }
+
+    _stats_cache["data"] = result
+    _stats_cache["ts"] = datetime.now()
+
+    return result
 
 
 _MAX_PROPOSAL_LEN = 400
 
 
 def _build_dashboard_message(data: dict) -> str:
-    """Build the dashboard summary message (Message 1)."""
+    """Build dashboard summary with counts, percentages, win rate and comparison metrics."""
     total = data["total"]
-    win_count = len(data["wins"])
-    vis_loss = len(data["losses_visible"])
-    seal_loss = len(data["losses_sealed"])
-    total_losses = vis_loss + seal_loss
-    no_winner_count = len(data["no_winner"])
-    active_count = len(data["active"])
-    errors = data["errors"]
+    wins = len(data["wins"])
+    losses_v = len(data["losses_visible"])
+    losses_s = len(data["losses_sealed"])
+    total_losses = losses_v + losses_s
+    no_win = len(data["no_winner"])
+    active_n = len(data["active"])
+    decided = wins + total_losses
 
     def pct(n):
         return f"{n / total * 100:.0f}" if total else "0"
 
-    decided = win_count + total_losses
-    if decided:
-        win_rate = f"{win_count / decided * 100:.0f}% ({win_count}/{decided} decided)"
-    else:
-        win_rate = "N/A"
-
-    our_avg = data.get("our_avg_bid", 0)
-    avg_win = data.get("avg_winning_bid")
+    win_rate = f"{wins / decided * 100:.0f}% ({wins}/{decided})" if decided else "N/A"
 
     lines = [
-        f"📊 <b>BID STATISTICS</b> (last {total} bids)",
+        f"📊 <b>BID STATISTICS</b> ({total} bids)",
         "━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "",
-        f"✅ Won: {win_count} ({pct(win_count)}%)",
-        f"❌ Lost: {total_losses} ({pct(total_losses)}%)",
+        f"✅ Won: {wins} ({pct(wins)}%)",
     ]
 
-    if total_losses > 0:
-        lines.append(f"   ├ visible: {vis_loss}")
-        lines.append(f"   └ sealed: {seal_loss}")
+    loss_line = f"❌ Lost: {total_losses} ({pct(total_losses)}%)"
+    if total_losses > 0 and (losses_v > 0 or losses_s > 0):
+        loss_line += f"  [{losses_v} visible, {losses_s} sealed]"
+    lines.append(loss_line)
+    lines.append(f"🚫 No winner: {no_win} ({pct(no_win)}%)")
+    lines.append(f"⏳ Active: {active_n} ({pct(active_n)}%)")
 
-    lines.append(f"🚫 No winner: {no_winner_count} ({pct(no_winner_count)}%)")
-    lines.append(f"⏳ Active: {active_count} ({pct(active_count)}%)")
+    if data.get("errors"):
+        lines.append(f"⚠️ Errors: {data['errors']}")
 
-    if errors:
-        lines.append(f"⚠️ Errors: {errors}")
-
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"💰 Your avg bid: ~${our_avg:.0f}")
-    if avg_win is not None:
-        lines.append(f"💰 Avg winning bid: ~${avg_win:.0f}")
     lines.append(f"🏆 Win rate: {win_rate}")
+
+    # Comparison metrics (vs winners in visible losses)
+    comp = data.get("comparison", {})
+    if comp:
+        lines.append("")
+        lines.append("<b>You vs Winners (in lost projects):</b>")
+
+        price_diff = comp.get("avg_price_diff_pct")
+        if price_diff is not None:
+            if price_diff >= 0:
+                lines.append(f"💰 Your bid is <b>{price_diff:.0f}% higher</b>")
+            else:
+                lines.append(f"💰 Your bid is <b>{abs(price_diff):.0f}% lower</b>")
+
+        prop_diff = comp.get("avg_proposal_diff_chars")
+        if prop_diff is not None:
+            if prop_diff >= 0:
+                lines.append(f"📝 Your proposal is <b>{prop_diff:.0f} chars longer</b>")
+            else:
+                lines.append(f"📝 Your proposal is <b>{abs(prop_diff):.0f} chars shorter</b>")
+
+        rev_diff = comp.get("avg_review_diff")
+        if rev_diff is not None:
+            if rev_diff >= 0:
+                lines.append(f"⭐ You have <b>{rev_diff:.0f} more</b> reviews")
+            else:
+                lines.append(f"⭐ You have <b>{abs(rev_diff):.0f} fewer</b> reviews")
 
     return "\n".join(lines)
 
 
-def _build_loss_card(loss: dict, is_sealed: bool = False) -> str:
-    """Build a single loss analysis card."""
+def _build_loss_card(loss: dict, is_sealed: bool = False, my_profile: dict = None) -> str:
+    """Build a single loss analysis card with symmetric YOU vs WINNER format."""
     title_esc = html.escape(loss["title"])
     url = loss["url"]
     title_link = f"<a href='{url}'>{title_esc}</a>"
@@ -546,47 +675,59 @@ def _build_loss_card(loss: dict, is_sealed: bool = False) -> str:
     if len(our_proposal) > _MAX_PROPOSAL_LEN:
         our_proposal = our_proposal[:_MAX_PROPOSAL_LEN] + "..."
 
+    def _profile_line(profile: dict) -> str:
+        """Format: Country · ⭐4.9 · 12 reviews · 95%"""
+        if not profile:
+            return ""
+        parts = []
+        country = profile.get("country")
+        if country:
+            parts.append(html.escape(country))
+        rating = profile.get("rating")
+        if rating is not None:
+            parts.append(f"⭐{rating:.1f}")
+        reviews = profile.get("reviews")
+        if reviews is not None:
+            parts.append(f"{reviews} reviews")
+        cr = profile.get("completion_rate")
+        if cr is not None:
+            parts.append(f"{cr * 100:.0f}%")
+        return " · ".join(parts)
+
     lines = [
         f"❌ <b>{title_link}</b>",
         f"📅 {date} | Budget: {budget_str}",
-        "",
-        f"🙋 Your bid: {our_amount:.0f} {currency}",
     ]
 
+    # — YOU —
+    lines.append("")
+    my_header = f"🙋 YOU: {our_amount:.0f} {currency}"
+    my_stats = _profile_line(my_profile) if my_profile else ""
+    if my_stats:
+        my_header += f"\n{my_stats}"
+    lines.append(my_header)
     if our_proposal:
         lines.append(f"<blockquote>{our_proposal}</blockquote>")
 
+    # — WINNER —
     if is_sealed:
         lines.append("")
         lines.append("🔒 <i>Awarded to another (details hidden)</i>")
     else:
-        winner_amount = loss.get("winner_amount", 0)
         wp = loss.get("winner_profile", {})
+        winner_amount = loss.get("winner_amount", 0)
         winner_proposal = html.escape(loss.get("winner_proposal", ""))
         if len(winner_proposal) > _MAX_PROPOSAL_LEN:
             winner_proposal = winner_proposal[:_MAX_PROPOSAL_LEN] + "..."
 
-        # Winner header with profile stats
         lines.append("")
-        country = html.escape(wp.get("country", "N/A")) if wp else "N/A"
-        winner_line = f"🏆 Winner: {winner_amount:.0f} {currency} · {country}"
-        if wp:
-            username = wp.get("username")
-            if username:
-                winner_line = f"🏆 Winner: @{html.escape(username)} · {winner_amount:.0f} {currency}"
-            parts = []
-            rating = wp.get("rating")
-            if rating is not None:
-                parts.append(f"⭐{rating:.1f}")
-            reviews = wp.get("reviews")
-            if reviews is not None:
-                parts.append(f"{reviews} reviews")
-            cr = wp.get("completion_rate")
-            if cr is not None:
-                parts.append(f"{cr * 100:.0f}%")
-            if parts:
-                winner_line += f"\n{country} · {' · '.join(parts)}"
-        lines.append(winner_line)
+        winner_header = f"🏆 WINNER: {winner_amount:.0f} {currency}"
+        if wp and wp.get("username"):
+            winner_header = f"🏆 WINNER @{html.escape(wp['username'])}: {winner_amount:.0f} {currency}"
+        winner_stats = _profile_line(wp)
+        if winner_stats:
+            winner_header += f"\n{winner_stats}"
+        lines.append(winner_header)
 
         if winner_proposal:
             lines.append(f"<blockquote>{winner_proposal}</blockquote>")
@@ -624,50 +765,136 @@ def _build_compact_summary(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _build_weekly_subset(data: dict, cutoff_str: str) -> dict:
+    """Filter classified data to entries created after cutoff. Recompute comparison metrics."""
+
+    def _after(lst):
+        return [e for e in lst if e.get("created_at_raw", "") >= cutoff_str]
+
+    losses_visible = _after(data["losses_visible"])
+
+    weekly = {
+        "wins": _after(data["wins"]),
+        "losses_visible": losses_visible,
+        "losses_sealed": _after(data["losses_sealed"]),
+        "no_winner": _after(data["no_winner"]),
+        "active": _after(data["active"]),
+        "errors": 0,
+        "my_profile": data.get("my_profile", {}),
+    }
+    weekly["total"] = sum(
+        len(weekly[k]) for k in ["wins", "losses_visible", "losses_sealed", "no_winner", "active"]
+    )
+
+    # Recompute comparison metrics for the weekly window
+    my_reviews = weekly["my_profile"].get("reviews")
+    price_diffs = []
+    proposal_diffs = []
+    review_diffs = []
+
+    for loss in losses_visible:
+        wa = loss.get("winner_amount", 0)
+        oa = loss.get("our_amount", 0)
+        if wa > 0 and oa > 0:
+            price_diffs.append((oa / wa - 1) * 100)
+
+        our_len = len(loss.get("our_proposal", ""))
+        win_len = len(loss.get("winner_proposal", ""))
+        if our_len > 0 or win_len > 0:
+            proposal_diffs.append(our_len - win_len)
+
+        wr = (loss.get("winner_profile") or {}).get("reviews")
+        if wr is not None and my_reviews is not None:
+            review_diffs.append(my_reviews - wr)
+
+    comparison = {}
+    if price_diffs:
+        comparison["avg_price_diff_pct"] = sum(price_diffs) / len(price_diffs)
+    if proposal_diffs:
+        comparison["avg_proposal_diff_chars"] = sum(proposal_diffs) / len(proposal_diffs)
+    if review_diffs:
+        comparison["avg_review_diff"] = sum(review_diffs) / len(review_diffs)
+    weekly["comparison"] = comparison
+
+    return weekly
+
+
+_MAX_LOSS_CARDS = 10
+
+
 async def cmd_bid_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /bidstats command — dashboard + loss analysis + compact summary."""
-    await update.message.reply_text("⏳ Fetching bid statistics, please wait...")
+    """Handle /bidstats — show period picker buttons."""
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 All time", callback_data="bidstats:alltime"),
+            InlineKeyboardButton("📅 Last 7 days", callback_data="bidstats:weekly"),
+        ]
+    ])
+    await update.message.reply_text("Choose period:", reply_markup=keyboard)
 
-    repo = ProjectRepository()
-    recent_bids = repo.get_recent_bids_full(limit=25)
 
-    if not recent_bids:
-        await update.message.reply_text("No recent successful bids found.")
-        return
+async def handle_bidstats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle bidstats period selection."""
+    query = update.callback_query
+    await query.answer()
+    period = query.data.split(":")[1]  # "alltime" or "weekly"
+
+    await query.edit_message_text("⏳ Fetching bid statistics, please wait...")
 
     try:
         import asyncio
         loop = asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, _fetch_bid_stats_sync, recent_bids)
+        data = await loop.run_in_executor(None, _fetch_bid_stats_sync)
 
-        # Message 1: Dashboard Summary
-        dashboard = _build_dashboard_message(data)
-        await update.message.reply_text(dashboard, parse_mode="HTML")
+        if data["total"] == 0:
+            await query.edit_message_text("No bids found.")
+            return
 
-        # Message 2: Loss Analysis Cards (one per loss)
-        all_losses = (
-            [(loss, False) for loss in data["losses_visible"]]
-            + [(loss, True) for loss in data["losses_sealed"]]
-        )
+        if period == "alltime":
+            # All time: only dashboard summary
+            dashboard = _build_dashboard_message(data)
+            await query.edit_message_text(dashboard, parse_mode="HTML")
 
-        if all_losses:
-            for loss, is_sealed in all_losses:
-                try:
-                    card = _build_loss_card(loss, is_sealed=is_sealed)
-                    await update.message.reply_text(
-                        card, parse_mode="HTML", disable_web_page_preview=True
+        else:
+            # Weekly: dashboard + loss cards + compact
+            cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+            weekly_data = _build_weekly_subset(data, cutoff)
+
+            dashboard = _build_dashboard_message(weekly_data)
+            await query.edit_message_text(dashboard, parse_mode="HTML")
+
+            # Loss cards (most recent N)
+            all_losses = (
+                [(loss, False) for loss in weekly_data["losses_visible"]]
+                + [(loss, True) for loss in weekly_data["losses_sealed"]]
+            )
+
+            my_profile = data.get("my_profile", {})
+
+            if all_losses:
+                shown = all_losses[:_MAX_LOSS_CARDS]
+                for loss, is_sealed in shown:
+                    try:
+                        card = _build_loss_card(loss, is_sealed=is_sealed, my_profile=my_profile)
+                        await query.message.reply_text(
+                            card, parse_mode="HTML", disable_web_page_preview=True
+                        )
+                    except telegram_error.TelegramError as e:
+                        logger.error(f"Failed to send loss card: {e}")
+                if len(all_losses) > _MAX_LOSS_CARDS:
+                    await query.message.reply_text(
+                        f"<i>Showing {_MAX_LOSS_CARDS} of {len(all_losses)} losses</i>",
+                        parse_mode="HTML",
                     )
-                except telegram_error.TelegramError as e:
-                    logger.error(f"Failed to send loss card: {e}")
 
-        # Message 3: Wins + Active + Closed (compact)
-        compact = _build_compact_summary(data)
-        if compact:
-            await send_in_chunks(update, compact, max_length=4000)
+            # Compact summary
+            compact = _build_compact_summary(weekly_data)
+            if compact:
+                await query.message.reply_text(compact, parse_mode="HTML", disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Error in /bidstats: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error fetching bid stats: {e}")
+        await query.edit_message_text(f"❌ Error fetching bid stats: {e}")
 
 
 # Budget presets: (min, max)
@@ -790,6 +1017,7 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         new_min, new_max = _BUDGET_PRESETS[next_idx]
         state["min_budget"] = new_min
         state["max_budget"] = new_max
+        repo.set_budget_range(new_min, new_max)
 
         message = _build_settings_message(repo)
         keyboard = _get_settings_keyboard(repo)
@@ -1563,6 +1791,9 @@ def setup_handlers(application: Application):
 
     # Control panel Start/Stop callbacks
     application.add_handler(CallbackQueryHandler(handle_control_callback, pattern="^control:"))
+
+    # Bid stats period selection
+    application.add_handler(CallbackQueryHandler(handle_bidstats_callback, pattern="^bidstats:"))
 
     # Conversation handler for editing amount
     edit_amount_handler = ConversationHandler(
