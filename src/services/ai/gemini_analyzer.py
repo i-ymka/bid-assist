@@ -24,8 +24,8 @@ ANALYSIS_RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "
 BID_WRITER_RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "bid_writer.md"
 
 # Fallback chains (primary model comes from settings)
-ANALYSIS_FALLBACK_MODELS = ["gemini-3.1-flash-lite-preview", "gemini-2.5-pro"]  # gemini-3-pro-preview deprecated 2026-03-09
-BID_FALLBACK_MODELS = ["gemini-3-flash-preview", "gemini-flash-latest", "gemini-2.0-flash"]
+ANALYSIS_FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro"]
+BID_FALLBACK_MODELS = ["gemini-2.5-pro"]
 
 _cooldowns: dict[str, float] = {}  # model -> timestamp when it can be retried
 

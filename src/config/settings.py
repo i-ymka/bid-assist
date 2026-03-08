@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # Gemini CLI models (fallback chains handled in gemini_analyzer.py)
     gemini_model: str = Field("gemini-3.1-pro-preview", alias="GEMINI_MODEL")   # Call 1: feasibility analysis
-    bid_model: str = Field("gemini-3.1-flash-lite-preview", alias="BID_MODEL")  # Call 2: bid writing
+    bid_model: str = Field("gemini-2.5-flash", alias="BID_MODEL")               # Call 2: bid writing
 
     # Filtering Settings
     blacklist_raw: str = Field("", alias="BL")
