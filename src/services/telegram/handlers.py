@@ -1428,6 +1428,7 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
         budget_str,
         avg_bid_usd,
         bid_count,
+        budget_min_usd,
         budget_max_usd,
         min_daily_rate,
     )

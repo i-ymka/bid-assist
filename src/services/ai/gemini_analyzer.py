@@ -24,8 +24,8 @@ ANALYSIS_RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "
 BID_WRITER_RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "bid_writer.md"
 
 # Fallback chains (primary model comes from settings)
-ANALYSIS_FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro"]
-BID_FALLBACK_MODELS = ["gemini-2.5-pro"]
+ANALYSIS_FALLBACK_MODELS = ["gemini-3-pro-preview", "gemini-3.1-flash-lite-preview"]
+BID_FALLBACK_MODELS = ["gemini-3-flash-preview", "gemini-flash-latest"]
 
 _cooldowns: dict[str, float] = {}  # model -> timestamp when it can be retried
 
@@ -224,29 +224,39 @@ Then output ===RESULT=== and the structured result.
 def _calculate_amount(
     days: int,
     avg_bid_usd: float,
+    budget_min_usd: float,
     budget_max_usd: float,
     min_daily_rate: int = 100,
-) -> float:
+) -> Optional[float]:
     """Deterministic pricing formula.
 
     Args:
         days: Estimated working days
         avg_bid_usd: Average bid on the project in USD (0 if none)
-        budget_max_usd: Client's max budget in USD
+        budget_min_usd: Client's minimum budget in USD
+        budget_max_usd: Client's maximum budget in USD
         min_daily_rate: Minimum USD per day (default 100)
 
     Returns:
         Bid amount in USD, rounded to nearest $10.
+        Returns None if market price is below our minimum daily rate (→ SKIP).
     """
     floor = days * min_daily_rate
 
     if avg_bid_usd and avg_bid_usd > 0:
-        target = avg_bid_usd * 0.90       # 10% below average bid
+        target = avg_bid_usd * 0.90                              # 10% below average bid
     else:
-        target = (budget_max_usd or 0) * 0.75  # 75% of max budget if no avg
+        midpoint = ((budget_min_usd or 0) + (budget_max_usd or 0)) / 2
+        target = midpoint * 0.90                                 # 10% below budget midpoint
 
-    raw = max(floor, target)
-    return round(raw / 10) * 10
+    if target < floor:
+        logger.info(
+            f"Pricing: target ${target:.0f} < floor ${floor:.0f} "
+            f"({days}d × ${min_daily_rate}/d) — project underpriced for us"
+        )
+        return None  # signal to caller: skip this project
+
+    return round(target / 10) * 10
 
 
 def write_bid(
@@ -374,6 +384,7 @@ def analyze_project(
     budget_str: str,
     avg_bid_usd: float,
     bid_count: int,
+    budget_min_usd: float = 0,
     budget_max_usd: float = 0,
     min_daily_rate: int = 100,
 ) -> Optional[AnalysisResult]:
@@ -404,7 +415,16 @@ def analyze_project(
 
     # --- Pricing (deterministic) ---
     days = max(feasibility["days"], 1)
-    amount = _calculate_amount(days, avg_bid_usd, budget_max_usd, min_daily_rate)
+    amount = _calculate_amount(days, avg_bid_usd, budget_min_usd, budget_max_usd, min_daily_rate)
+    if amount is None:
+        return AnalysisResult(
+            verdict="SKIP",
+            summary=f"{feasibility['summary']} [Market price below ${min_daily_rate}/day minimum]",
+            bid_text="",
+            amount=0,
+            period=days,
+            raw_response="",
+        )
 
     # --- Call 2: Bid writing ---
     bid_text = write_bid(
@@ -432,6 +452,7 @@ def force_bid_analysis(
     budget_str: str,
     avg_bid_usd: float,
     bid_count: int,
+    budget_min_usd: float = 0,
     budget_max_usd: float = 0,
     min_daily_rate: int = 100,
 ) -> Optional[AnalysisResult]:
@@ -452,8 +473,11 @@ def force_bid_analysis(
         summary = ""
         logger.warning(f"Force bid: Call 1 failed for {project_id}, using default period={days}")
 
-    # Pricing
-    amount = _calculate_amount(days, avg_bid_usd, budget_max_usd, min_daily_rate)
+    # Pricing — for forced bids, use floor if market is below minimum
+    amount = _calculate_amount(days, avg_bid_usd, budget_min_usd, budget_max_usd, min_daily_rate)
+    if amount is None:
+        amount = round((days * min_daily_rate) / 10) * 10
+        logger.info(f"Force bid: market below floor, using floor ${amount:.0f}")
 
     # Call 2: write bid
     bid_text = write_bid(

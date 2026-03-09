@@ -296,6 +296,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                 budget_str,
                 avg_bid_usd,
                 bid_count,
+                budget_min_usd,
                 budget_max_usd,
                 min_daily_rate,
             )
