@@ -291,25 +291,80 @@ DELIVERY: {period} day(s) — DO NOT mention this in the bid text
 Output ONLY the BID: line. No other text.
 """
 
-    logger.info(f"[Call 2] Writing bid for project {project_id}...")
-    response = _run_gemini_cli(prompt, settings.bid_model, BID_FALLBACK_MODELS)
-    if not response:
-        return None
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        logger.info(f"[Call 2] Writing bid for project {project_id} (attempt {attempt}/{max_attempts})...")
+        response = _run_gemini_cli(prompt, settings.bid_model, BID_FALLBACK_MODELS)
+        if not response:
+            return None
 
-    logger.debug(f"[Call 2] Raw response:\n{response}")
+        logger.debug(f"[Call 2] Raw response:\n{response}")
 
-    bid_match = re.search(r"BID:\s*(.+?)(?:\Z)", response, re.DOTALL | re.IGNORECASE)
-    if not bid_match:
-        # Treat entire response as bid text if no BID: marker
-        bid_text = response.strip()
-    else:
-        bid_text = bid_match.group(1).strip()
+        bid_match = re.search(r"BID:\s*(.+?)(?:\Z)", response, re.DOTALL | re.IGNORECASE)
+        if bid_match:
+            bid_text = bid_match.group(1).strip()
+        else:
+            bid_text = response.strip()
 
-    if not bid_text:
-        logger.error(f"[Call 2] Empty bid text for project {project_id}")
-        return None
+        if not bid_text:
+            logger.error(f"[Call 2] Empty bid text for project {project_id}")
+            continue
 
-    return bid_text
+        # Validate: reject AI thinking chains / search logs / garbage
+        rejection = _validate_bid_text(bid_text)
+        if rejection:
+            logger.error(f"[Call 2] Bid REJECTED (attempt {attempt}): {rejection}")
+            logger.error(f"[Call 2] Rejected text: {bid_text[:300]}...")
+            continue
+
+        return bid_text
+
+    logger.error(f"[Call 2] All {max_attempts} attempts failed for project {project_id}")
+    return None
+
+
+# Phrases that indicate AI thinking/search process leaked into bid text
+_GARBAGE_PATTERNS = [
+    r"(?i)I need to perform",
+    r"(?i)I will search for",
+    r"(?i)my search for .+ (came up|yielded|returned|failed)",
+    r"(?i)I'll (rephrase|re-run|continue|retry)",
+    r"(?i)I already submitted the bid",
+    r"(?i)task completed",
+    r"(?i)I have completed the task",
+    r"(?i)(okay|ok),?\s+I",
+    r"(?i)search .+ (empty|nothing|failed)",
+    r"(?i)google_web_search",
+    r"(?i)I'll focus on",
+    r"(?i)I'm ready to write the bid",
+    r"(?i)got it\.",
+    r"(?i)next[:,]?\s+(Laravel|React|WordPress|search)",
+]
+_GARBAGE_RE = [re.compile(p) for p in _GARBAGE_PATTERNS]
+
+
+def _validate_bid_text(text: str) -> str | None:
+    """Validate bid text. Returns rejection reason or None if OK."""
+    # Too short (less than 50 chars = not a real proposal)
+    if len(text) < 50:
+        return f"Too short ({len(text)} chars)"
+
+    # Too long (> 2000 chars = probably thinking chain)
+    if len(text) > 2000:
+        return f"Too long ({len(text)} chars)"
+
+    # Check for AI thinking/search patterns
+    for pattern in _GARBAGE_RE:
+        match = pattern.search(text)
+        if match:
+            return f"AI thinking detected: '{match.group()[:60]}'"
+
+    # Too many sentences for a bid (3-5 expected, >15 = garbage)
+    sentence_count = len(re.findall(r'[.!?]+', text))
+    if sentence_count > 15:
+        return f"Too many sentences ({sentence_count})"
+
+    return None
 
 
 def analyze_project(
