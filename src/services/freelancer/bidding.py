@@ -300,9 +300,10 @@ class BiddingService:
             return set()
 
     def get_all_my_bids(self) -> list:
-        """Fetch ALL bids by the authenticated user with project details (paginated).
+        """Fetch ALL bids by the authenticated user (paginated).
 
-        Returns list of bid dicts, each enriched with '_project' key.
+        Does NOT use project_details=true (it limits results on some accounts).
+        Returns raw bid dicts from the API.
         """
         bidder_id = self._get_bidder_id()
         all_bids = []
@@ -317,7 +318,6 @@ class BiddingService:
                         "bidders[]": bidder_id,
                         "limit": page_size,
                         "offset": offset,
-                        "project_details": "true",
                     },
                 )
             except Exception as e:
@@ -330,12 +330,8 @@ class BiddingService:
 
             result = response.get("result", {})
             bids = result.get("bids", [])
-            projects = result.get("projects", {})
 
-            for bid in bids:
-                pid = str(bid.get("project_id"))
-                bid["_project"] = projects.get(pid, {})
-                all_bids.append(bid)
+            all_bids.extend(bids)
 
             if len(bids) < page_size:
                 break

@@ -428,6 +428,12 @@ def _fetch_bid_stats_sync() -> dict:
     # Fetch ALL bids from Freelancer API (paginated, includes manual bids)
     api_bids = bidding_service.get_all_my_bids()
 
+    # Pre-load bid_history for project details (title, url, currency, budget)
+    bid_history_rows = repo.get_recent_bids_full()
+    bh_lookup = {}
+    for row in bid_history_rows:
+        bh_lookup[row["project_id"]] = row
+
     wins = []
     losses_visible = []
     losses_sealed = []
@@ -447,16 +453,13 @@ def _fetch_bid_stats_sync() -> dict:
             submit_ts = bid.get("submitdate", 0)
             award_status = bid.get("award_status", "")
 
-            # Project details from embedded _project (via project_details=true)
-            proj = bid.get("_project", {})
-            title = proj.get("title") or f"Project {project_id}"
-            seo_url = proj.get("seo_url", "")
-            url = f"https://www.freelancer.com/projects/{seo_url}" if seo_url else f"https://www.freelancer.com/projects/{project_id}"
-            currency_obj = proj.get("currency", {})
-            currency = currency_obj.get("code", "USD") if currency_obj else "USD"
-            budget = proj.get("budget", {}) or {}
-            budget_min = budget.get("minimum", 0) or 0
-            budget_max = budget.get("maximum", 0) or 0
+            # Project details from bid_history DB (bot-placed bids)
+            bh = bh_lookup.get(project_id, {})
+            title = (bh["title"] if bh else None) or f"Project {project_id}"
+            url = (bh["url"] if bh else None) or f"https://www.freelancer.com/projects/{project_id}"
+            currency = (bh["currency"] if bh else None) or "USD"
+            budget_min = (bh["budget_min"] if bh else None) or 0
+            budget_max = (bh["budget_max"] if bh else None) or 0
 
             # Format date from unix timestamp
             try:
@@ -901,6 +904,7 @@ async def handle_bidstats_callback(update: Update, context: ContextTypes.DEFAULT
 _BUDGET_PRESETS = [
     (30, 500),
     (50, 1000),
+    (100, 1000),
     (50, 2000),
     (50, 3000),
     (100, 5000),
