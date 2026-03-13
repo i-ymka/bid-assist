@@ -376,7 +376,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                     notif_sent = False
                     for chat_id in settings.telegram_chat_ids:
                         if bid_result.success:
-                            msg = await notifier.send_auto_bid_notification(
+                            msg, orig_text, orig_keyboard = await notifier.send_auto_bid_notification(
                                 chat_id=chat_id,
                                 project_id=project_id,
                                 title=project_data["title"],
@@ -414,8 +414,8 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                                         original_amount=result.amount,
                                         days=result.period,
                                         min_daily_rate=repo.get_min_daily_rate(),
-                                        original_text=getattr(msg, '_original_md_text', None),
-                                        original_keyboard=getattr(msg, '_original_keyboard', None),
+                                        original_text=orig_text,
+                                        original_keyboard=orig_keyboard,
                                     )
                                 )
 
@@ -487,7 +487,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                     bid_svc = BiddingService()
 
                     for chat_id in settings.telegram_chat_ids:
-                        msg = await notifier.send_gpt_decision_notification_to_user(
+                        msg, orig_text, orig_keyboard = await notifier.send_gpt_decision_notification_to_user(
                             chat_id=chat_id,
                             project_id=project_id,
                             title=project_data["title"],
@@ -515,8 +515,8 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                                     project_id=project_id,
                                     bidding_service=bid_svc,
                                     currency=currency,
-                                    original_text=getattr(msg, '_original_md_text', None),
-                                    original_keyboard=getattr(msg, '_original_keyboard', None),
+                                    original_text=orig_text,
+                                    original_keyboard=orig_keyboard,
                                 )
                             )
                         logger.info(f"BID notification sent to {chat_id} for {project_id}")

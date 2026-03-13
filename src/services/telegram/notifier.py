@@ -429,10 +429,7 @@ class Notifier:
             bid_text, suggested_amount, suggested_period
         )
         msg = await self.send_to_user(chat_id, text, keyboard)
-        if msg:
-            msg._original_md_text = text
-            msg._original_keyboard = keyboard
-        return msg
+        return msg, text, keyboard
 
     def _format_bid_notification(
         self,
@@ -732,10 +729,7 @@ class Notifier:
             ])
 
         msg = await self.send_to_user(chat_id, text, keyboard)
-        if msg:
-            msg._original_md_text = text
-            msg._original_keyboard = keyboard
-        return msg
+        return msg, text, keyboard
 
     async def send_auto_bid_failed_notification(
         self,
