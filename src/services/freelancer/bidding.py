@@ -352,6 +352,37 @@ class BiddingService:
         bidded_ids = self.get_my_bidded_project_ids()
         return project_id in bidded_ids
 
+    def update_bid(self, bid_id: int, amount: float, description: str = None) -> BidResult:
+        """Update existing bid amount (and optionally description)."""
+        payload = {"amount": amount}
+        if description is not None:
+            payload["description"] = strip_markdown(description)
+        try:
+            response = self._client.put(f"/projects/0.1/bids/{bid_id}/", data=payload)
+            if response.get("status") == "success":
+                return BidResult(success=True, message="Bid updated successfully", bid_id=bid_id)
+            else:
+                error_msg = response.get("message", "Unknown error from API")
+                logger.error(f"Update bid {bid_id} failed: {error_msg}")
+                return BidResult(success=False, message=error_msg, error_code=response.get("error_code"))
+        except Exception as e:
+            logger.error(f"Exception updating bid {bid_id}: {e}")
+            return BidResult(success=False, message=str(e))
+
+    def retract_bid(self, bid_id: int) -> BidResult:
+        """Retract (withdraw) a bid from a project."""
+        try:
+            response = self._client.delete(f"/projects/0.1/bids/{bid_id}/")
+            if response.get("status") == "success":
+                return BidResult(success=True, message="Bid retracted successfully", bid_id=bid_id)
+            else:
+                error_msg = response.get("message", "Unknown error from API")
+                logger.error(f"Retract bid {bid_id} failed: {error_msg}")
+                return BidResult(success=False, message=error_msg, error_code=response.get("error_code"))
+        except Exception as e:
+            logger.error(f"Exception retracting bid {bid_id}: {e}")
+            return BidResult(success=False, message=str(e))
+
     def get_remaining_bids(self) -> Optional[int]:
         """Get remaining bid count."""
         return self._client.get_remaining_bids()

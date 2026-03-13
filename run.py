@@ -394,15 +394,16 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                                 bid_id=bid_result.bid_id,
                                 rank_info=rank_info,
                                 remaining_bids=remaining_bids,
+                                fair_price=result.fair_price,
                             )
                             if msg:
                                 notif_sent = True
 
                             # Schedule delayed update with fresh stats
                             if msg and bid_result.bid_id:
-                                from src.services.telegram.notifier import schedule_bid_update
+                                from src.services.telegram.notifier import schedule_price_corrections
                                 asyncio.create_task(
-                                    schedule_bid_update(
+                                    schedule_price_corrections(
                                         bot=notifier._bot,
                                         chat_id=chat_id,
                                         message_id=msg.message_id,
@@ -410,6 +411,9 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                                         bid_id=bid_result.bid_id,
                                         bidding_service=bidding_service,
                                         currency=currency,
+                                        original_amount=result.amount,
+                                        days=result.period,
+                                        min_daily_rate=repo.get_min_daily_rate(),
                                         original_text=getattr(msg, '_original_md_text', None),
                                         original_keyboard=getattr(msg, '_original_keyboard', None),
                                     )

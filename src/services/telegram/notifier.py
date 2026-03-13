@@ -9,6 +9,7 @@ from src.models import Project, AIAnalysis
 from src.config import settings
 from src.services.storage import ProjectRepository
 from src.services.freelancer.bidding import strip_markdown
+from src.services.currency import to_usd, from_usd, round_up_10
 
 logger = logging.getLogger(__name__)
 
@@ -661,6 +662,7 @@ class Notifier:
         bid_id: int = None,
         rank_info: dict = None,
         remaining_bids: int = None,
+        fair_price: Optional[float] = None,
     ) -> Optional[Message]:
         """Send auto-bid success notification. Returns Message for delayed updates."""
         if budget_min and budget_max:
@@ -705,6 +707,15 @@ class Notifier:
             f"\n{ce('proposal')} Bid Proposal:\n```\n{bid_text_escaped}\n```\n",
             f"\n{ce('check')} {amount_escaped} · {period} days\n",
         ]
+
+        if fair_price is not None:
+            fair_price_escaped = escape_markdown_v2(f"~${fair_price:.0f}")
+            lines.append(f"🤖 AI estimate: {fair_price_escaped}\n")
+            amount_usd = to_usd(amount, currency)
+            if fair_price < amount_usd * 0.5:
+                our_usd_escaped = escape_markdown_v2(f"${amount_usd:.0f}")
+                fp_escaped = escape_markdown_v2(f"${fair_price:.0f}")
+                lines.append(f"⚠️ *AI PRICE WARNING: we bid {our_usd_escaped}, AI thinks {fp_escaped}*\n")
 
         if remaining_bids is not None:
             lines.append(f"{ce('ticket')} {remaining_bids} bids remaining\n")
@@ -894,3 +905,103 @@ async def schedule_bid_update(
 
     except Exception as e:
         logger.error(f"Delayed bid update failed for {project_id}: {e}")
+
+
+async def schedule_price_corrections(
+    bot: Bot,
+    chat_id,
+    message_id: int,
+    project_id: int,
+    bid_id: int,
+    bidding_service,
+    currency: str,
+    original_amount: float,
+    days: int,
+    min_daily_rate: int,
+    original_text: str,
+    original_keyboard: InlineKeyboardMarkup,
+):
+    """Через 60s и 600s: пересчёт цены и обновление бида.
+
+    Также обновляет Telegram-сообщение (bids line + строка с изменением цены).
+    """
+    if not original_text or not bidding_service or not bid_id:
+        return
+
+    current_text = original_text
+    current_amount = original_amount
+
+    for delay in [60, 600]:
+        sleep_time = delay if delay == 60 else 540  # 60s, затем ещё 540s = итого 10min
+        await asyncio.sleep(sleep_time)
+
+        try:
+            # 1. Получить свежий avg_bid
+            rank_info = bidding_service.get_bid_rank(bid_id, project_id, retry_delay=0)
+            if not rank_info:
+                continue
+
+            avg_bid_currency = rank_info.get("avg_bid", 0)
+            total = rank_info.get("total_bids")
+            rank = rank_info.get("rank")
+
+            # 2. Пересчитать в USD
+            avg_bid_usd = to_usd(avg_bid_currency, currency) if currency != "USD" else avg_bid_currency
+            floor_usd = days * min_daily_rate
+            target_usd = avg_bid_usd * 0.90 if avg_bid_usd else 0
+
+            # 3. Обновить bids line в сообщении
+            if total is not None:
+                current_text = replace_bids_line(current_text, rank=rank, total=total, avg=avg_bid_currency, currency=currency)
+
+            # 4. Решить что делать с ценой
+            price_line = None
+            minutes = delay // 60
+
+            if target_usd <= 0:
+                pass  # нет данных avg — не меняем цену
+            elif target_usd < floor_usd:
+                # Отзываем бид
+                result = bidding_service.retract_bid(bid_id)
+                if result.success:
+                    price_line = f"🚫 _Bid retracted \\({minutes}min\\) — market avg below minimum_"
+                    logger.info(f"Bid {bid_id} retracted at {minutes}min: avg ${avg_bid_usd:.0f} → target ${target_usd:.0f} < floor ${floor_usd:.0f}")
+                else:
+                    logger.error(f"Retract bid {bid_id} failed: {result.message}")
+            else:
+                # Пересчитать новую цену в валюте проекта
+                new_amount_usd = round(target_usd / 10) * 10
+                new_amount = round_up_10(from_usd(new_amount_usd, currency)) if currency != "USD" else new_amount_usd
+
+                if new_amount < current_amount:
+                    result = bidding_service.update_bid(bid_id, new_amount)
+                    if result.success:
+                        price_line = f"💰 _Price updated \\({minutes}min\\): {escape_markdown_v2(currency)} {escape_markdown_v2(f'{current_amount:.0f}')} → {escape_markdown_v2(f'{new_amount:.0f}')}_"
+                        logger.info(f"Bid {bid_id} updated at {minutes}min: {current_amount:.0f} → {new_amount:.0f} {currency}")
+                        current_amount = new_amount
+                    else:
+                        logger.error(f"Update bid {bid_id} failed: {result.message}")
+
+            # 5. Добавить строку изменения цены в сообщение
+            if price_line:
+                current_text = current_text + f"\n{price_line}"
+
+            # 6. Обновить сообщение в Telegram
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=current_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=original_keyboard,
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logger.error(f"Failed to edit message for {project_id}: {e}")
+
+            # Если бид отозван — дальше нет смысла
+            if price_line and "retracted" in price_line:
+                break
+
+        except Exception as e:
+            logger.error(f"Price correction failed for {project_id} at {delay//60}min: {e}")

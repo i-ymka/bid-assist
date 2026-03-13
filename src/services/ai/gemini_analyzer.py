@@ -24,8 +24,8 @@ ANALYSIS_RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "
 BID_WRITER_RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "bid_writer.md"
 
 # Fallback chains (primary model comes from settings)
-ANALYSIS_FALLBACK_MODELS = ["gemini-3-pro-preview", "gemini-3.1-flash-lite-preview"]
-BID_FALLBACK_MODELS = ["gemini-3-flash-preview", "gemini-flash-latest"]
+ANALYSIS_FALLBACK_MODELS = ["gemini-2.5-pro"]
+BID_FALLBACK_MODELS = ["gemini-2.5-pro"]
 
 _cooldowns: dict[str, float] = {}  # model -> timestamp when it can be retried
 
@@ -39,6 +39,7 @@ class AnalysisResult:
     amount: float
     period: int    # working days
     raw_response: str
+    fair_price: Optional[float] = None  # AI's market price estimate from Call 2
 
 
 def _load_prompt(path: Path) -> str:
@@ -162,7 +163,6 @@ def analyze_feasibility(
     Returns None if the call failed entirely.
     """
     rules = _load_prompt(ANALYSIS_RULES_PATH)
-    avg_bid_str = f"{avg_bid_usd:.0f}" if avg_bid_usd else "No bids yet"
 
     prompt = f"""{rules}
 
@@ -170,11 +170,8 @@ def analyze_feasibility(
 
 Now analyze this project. Follow ALL rules above.
 
-PROJECT ID: {project_id}
 TITLE: {title}
 BUDGET: {budget_str}
-AVERAGE BID: {avg_bid_str}
-BID COUNT: {bid_count}
 
 DESCRIPTION:
 {description}
@@ -186,7 +183,7 @@ Then output ===RESULT=== and the structured result.
 """
 
     logger.info(f"[Call 1] Analyzing feasibility: {title[:50]}...")
-    response = _run_gemini_cli(prompt, settings.gemini_model, ANALYSIS_FALLBACK_MODELS)
+    response = _run_gemini_cli(prompt, settings.gemini_model, ANALYSIS_FALLBACK_MODELS, timeout=1200)
     if not response:
         return None
 
@@ -266,7 +263,7 @@ def write_bid(
     summary: str,
     amount: float,
     period: int,
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[float]]:
     """Call 2: Write bid text for a project that passed feasibility.
 
     Args:
@@ -275,7 +272,7 @@ def write_bid(
         period: Working days (DO NOT mention in bid text)
 
     Returns:
-        Bid text string, or None if the call failed.
+        Tuple of (bid_text, fair_price). bid_text is None if the call failed.
     """
     rules = _load_prompt(BID_WRITER_RULES_PATH)
 
@@ -298,7 +295,7 @@ DELIVERY: {period} day(s) — DO NOT mention this in the bid text
 
 ---
 
-Output ONLY the BID: line. No other text.
+Output ONLY the BID: and FAIR_PRICE: lines. No other text.
 """
 
     max_attempts = 2
@@ -306,15 +303,18 @@ Output ONLY the BID: line. No other text.
         logger.info(f"[Call 2] Writing bid for project {project_id} (attempt {attempt}/{max_attempts})...")
         response = _run_gemini_cli(prompt, settings.bid_model, BID_FALLBACK_MODELS)
         if not response:
-            return None
+            return None, None
 
         logger.debug(f"[Call 2] Raw response:\n{response}")
 
-        bid_match = re.search(r"BID:\s*(.+?)(?:\Z)", response, re.DOTALL | re.IGNORECASE)
+        bid_match = re.search(r"BID:\s*(.+?)(?=\nFAIR_PRICE:|\Z)", response, re.DOTALL | re.IGNORECASE)
         if bid_match:
             bid_text = bid_match.group(1).strip()
         else:
             bid_text = response.strip()
+
+        fair_price_match = re.search(r"FAIR_PRICE:\s*\$?(\d+)", response, re.IGNORECASE)
+        fair_price = float(fair_price_match.group(1)) if fair_price_match else None
 
         if not bid_text:
             logger.error(f"[Call 2] Empty bid text for project {project_id}")
@@ -327,10 +327,10 @@ Output ONLY the BID: line. No other text.
             logger.error(f"[Call 2] Rejected text: {bid_text[:300]}...")
             continue
 
-        return bid_text
+        return bid_text, fair_price
 
     logger.error(f"[Call 2] All {max_attempts} attempts failed for project {project_id}")
-    return None
+    return None, None
 
 
 # Phrases that indicate AI thinking/search process leaked into bid text
@@ -427,7 +427,7 @@ def analyze_project(
         )
 
     # --- Call 2: Bid writing ---
-    bid_text = write_bid(
+    bid_text, fair_price = write_bid(
         project_id, title, description,
         feasibility["summary"], amount, days,
     )
@@ -442,6 +442,7 @@ def analyze_project(
         amount=amount,
         period=days,
         raw_response="",
+        fair_price=fair_price,
     )
 
 
@@ -480,7 +481,7 @@ def force_bid_analysis(
         logger.info(f"Force bid: market below floor, using floor ${amount:.0f}")
 
     # Call 2: write bid
-    bid_text = write_bid(
+    bid_text, fair_price = write_bid(
         project_id, title, description, summary, amount, days,
     )
     if not bid_text:
@@ -495,4 +496,5 @@ def force_bid_analysis(
         amount=amount,
         period=days,
         raw_response="",
+        fair_price=fair_price,
     )
