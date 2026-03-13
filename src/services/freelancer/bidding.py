@@ -370,18 +370,13 @@ class BiddingService:
             return BidResult(success=False, message=str(e))
 
     def retract_bid(self, bid_id: int) -> BidResult:
-        """Retract (withdraw) a bid from a project."""
-        try:
-            response = self._client.delete(f"/projects/0.1/bids/{bid_id}/")
-            if response.get("status") == "success":
-                return BidResult(success=True, message="Bid retracted successfully", bid_id=bid_id)
-            else:
-                error_msg = response.get("message", "Unknown error from API")
-                logger.error(f"Retract bid {bid_id} failed: {error_msg}")
-                return BidResult(success=False, message=error_msg, error_code=response.get("error_code"))
-        except Exception as e:
-            logger.error(f"Exception retracting bid {bid_id}: {e}")
-            return BidResult(success=False, message=str(e))
+        """Retract (withdraw) a bid from a project.
+
+        Note: Freelancer public API (DELETE /bids/{id}/) returns 405 Method Not Allowed.
+        This method is a no-op stub — callers should warn the user to retract manually.
+        """
+        logger.warning(f"retract_bid({bid_id}): Freelancer API does not support bid retraction via REST. Manual retraction required.")
+        return BidResult(success=False, message="API_NOT_SUPPORTED")
 
     def get_remaining_bids(self) -> Optional[int]:
         """Get remaining bid count."""

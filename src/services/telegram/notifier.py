@@ -961,13 +961,9 @@ async def schedule_price_corrections(
             if target_usd <= 0:
                 pass  # нет данных avg — не меняем цену
             elif target_usd < floor_usd:
-                # Отзываем бид
-                result = bidding_service.retract_bid(bid_id)
-                if result.success:
-                    price_line = f"🚫 _Bid retracted \\({minutes}min\\) — market avg below minimum_"
-                    logger.info(f"Bid {bid_id} retracted at {minutes}min: avg ${avg_bid_usd:.0f} → target ${target_usd:.0f} < floor ${floor_usd:.0f}")
-                else:
-                    logger.error(f"Retract bid {bid_id} failed: {result.message}")
+                # Рынок ниже нашего минимума — предупреждаем, Freelancer API не поддерживает отзыв
+                price_line = f"⚠️ _Market below minimum at {minutes}min — retract manually\\! avg ${escape_markdown_v2(f'{avg_bid_usd:.0f}')}, floor ${escape_markdown_v2(f'{floor_usd:.0f}')}_"
+                logger.warning(f"Bid {bid_id} at {minutes}min: avg ${avg_bid_usd:.0f} → target ${target_usd:.0f} < floor ${floor_usd:.0f} — manual retraction needed")
             else:
                 # Пересчитать новую цену в валюте проекта
                 new_amount_usd = round(target_usd / 10) * 10
@@ -999,8 +995,8 @@ async def schedule_price_corrections(
             except Exception as e:
                 logger.error(f"Failed to edit message for {project_id}: {e}")
 
-            # Если бид отозван — дальше нет смысла
-            if price_line and "retracted" in price_line:
+            # Если рынок ниже минимума — дальше обновлять нет смысла
+            if price_line and "below minimum" in price_line:
                 break
 
         except Exception as e:
