@@ -1763,7 +1763,7 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
         budget_min_usd,
         budget_max_usd,
         min_daily_rate,
-        project_data.get("owner_username", ""),
+        project_data.get("owner_display_name") or project_data.get("owner_username", ""),
         bid_adjustment,
     )
 

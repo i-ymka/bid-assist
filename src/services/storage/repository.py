@@ -233,6 +233,12 @@ class ProjectRepository:
                 except sqlite3.OperationalError:
                     pass  # Column already exists
 
+                # Add owner_display_name column to project_queue if not exists (migration)
+                try:
+                    self._conn.execute("ALTER TABLE project_queue ADD COLUMN owner_display_name TEXT DEFAULT ''")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+
                 # Add is_preferred_only column to project_queue if not exists (migration)
                 try:
                     self._conn.execute("ALTER TABLE project_queue ADD COLUMN is_preferred_only INTEGER DEFAULT 0")
@@ -727,6 +733,7 @@ class ProjectRepository:
         time_submitted: datetime = None,
         skill_names: str = None,
         owner_username: str = "",
+        owner_display_name: str = "",
         is_preferred_only: bool = False,
     ) -> bool:
         """Add a project to the queue for GPT processing.
@@ -744,6 +751,7 @@ class ProjectRepository:
             url: Project URL
             time_submitted: When project was submitted
             skill_names: Comma-separated skill/tag names for keyword matching
+            owner_display_name: Client's display name (public_name from API)
 
         Returns:
             True if added successfully, False if already exists.
@@ -754,11 +762,11 @@ class ProjectRepository:
                     """
                     INSERT OR IGNORE INTO project_queue
                     (project_id, title, description, budget_min, budget_max,
-                     currency, client_country, bid_count, avg_bid, url, time_submitted, status, skill_names, owner_username, is_preferred_only)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                     currency, client_country, bid_count, avg_bid, url, time_submitted, status, skill_names, owner_username, owner_display_name, is_preferred_only)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
                     """,
                     (project_id, title, description, budget_min, budget_max,
-                     currency, client_country, bid_count, avg_bid, url, time_submitted, skill_names, owner_username, 1 if is_preferred_only else 0),
+                     currency, client_country, bid_count, avg_bid, url, time_submitted, skill_names, owner_username, owner_display_name, 1 if is_preferred_only else 0),
                 )
             logger.debug(f"Added project {project_id} to queue")
             return True

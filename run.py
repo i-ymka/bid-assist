@@ -261,6 +261,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                     time_submitted=project.time_submitted,
                     skill_names=skill_names,
                     owner_username=project.owner.username,
+                    owner_display_name=project.owner.display_name or "",
                     is_preferred_only=project.is_preferred_only,
                 )
                 new_count += 1
@@ -392,7 +393,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                     budget_min_usd,
                     budget_max_usd,
                     min_daily_rate,
-                    project_data.get("owner_username", ""),
+                    project_data.get("owner_display_name") or project_data.get("owner_username", ""),
                     bid_adjustment,
                     cached_feasibility,  # None → analyze_project runs Call 1 itself (fallback)
                 ),

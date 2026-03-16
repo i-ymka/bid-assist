@@ -267,7 +267,7 @@ def write_bid(
     summary: str,
     amount: float,
     period: int,
-    owner_username: str = "",
+    owner_name: str = "",
 ) -> tuple[Optional[str], Optional[float]]:
     """Call 2: Write bid text for a project that passed feasibility.
 
@@ -275,14 +275,14 @@ def write_bid(
         summary: SUMMARY from Call 1 (context for the bid writer)
         amount: Pre-calculated bid amount (DO NOT mention in bid text)
         period: Working days (DO NOT mention in bid text)
-        owner_username: Freelancer username of the client (optional, for personalization)
+        owner_name: Display name of the client (optional, for personalization)
 
     Returns:
         Tuple of (bid_text, fair_price). bid_text is None if the call failed.
     """
     rules = _load_prompt(BID_WRITER_RULES_PATH)
 
-    client_line = f"\nCLIENT USERNAME: {owner_username}" if owner_username else ""
+    client_line = f"\nCLIENT NAME: {owner_name}" if owner_name else ""
 
     prompt = f"""{rules}
 
@@ -395,7 +395,7 @@ def analyze_project(
     budget_min_usd: float = 0,
     budget_max_usd: float = 0,
     min_daily_rate: int = 100,
-    owner_username: str = "",
+    owner_name: str = "",
     bid_adjustment: int = -10,
     feasibility: Optional[dict] = None,
 ) -> Optional[AnalysisResult]:
@@ -446,7 +446,7 @@ def analyze_project(
     bid_text, fair_price = write_bid(
         project_id, title, description,
         feasibility["summary"], amount, days,
-        owner_username=owner_username,
+        owner_name=owner_name,
     )
     if not bid_text:
         logger.error(f"Bid writing failed for project {project_id}")
@@ -473,7 +473,7 @@ def force_bid_analysis(
     budget_min_usd: float = 0,
     budget_max_usd: float = 0,
     min_daily_rate: int = 100,
-    owner_username: str = "",
+    owner_name: str = "",
     bid_adjustment: int = -10,
 ) -> Optional[AnalysisResult]:
     """Force generate a bid regardless of SKIP verdict (user clicked 'Ask for Bid').
@@ -502,7 +502,7 @@ def force_bid_analysis(
     # Call 2: write bid
     bid_text, fair_price = write_bid(
         project_id, title, description, summary, amount, days,
-        owner_username=owner_username,
+        owner_name=owner_name,
     )
     if not bid_text:
         logger.error(f"Force bid: Call 2 failed for project {project_id}")

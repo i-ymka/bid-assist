@@ -23,6 +23,7 @@ class ProjectOwner(BaseModel):
 
     id: int = 0
     username: str = "N/A"
+    display_name: Optional[str] = None
     country: str = "Unknown"
 
 
@@ -131,6 +132,7 @@ class Project(BaseModel):
             owner_obj = data["owner"]
             owner_data["id"] = owner_obj.get("id") or owner_id or 0
             owner_data["username"] = owner_obj.get("username", "N/A")
+            owner_data["display_name"] = owner_obj.get("public_name") or owner_obj.get("display_name") or None
             # Check if location is directly on owner object
             location = owner_obj.get("location", {})
             if location:
@@ -143,6 +145,8 @@ class Project(BaseModel):
         user = users.get(str(owner_id)) or users.get(owner_id) if users else None
         if user:
             owner_data["username"] = user.get("username", owner_data["username"])
+            if not owner_data.get("display_name"):
+                owner_data["display_name"] = user.get("public_name") or user.get("display_name") or None
             location = user.get("location", {})
             if location:
                 country = location.get("country", {})
