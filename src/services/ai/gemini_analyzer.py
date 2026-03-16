@@ -19,9 +19,10 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Prompt paths
-ANALYSIS_RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "analyze.md"
-BID_WRITER_RULES_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "bid_writer.md"
+# Prompt paths (configurable per-account via PROMPTS_DIR in .env)
+_ROOT = Path(__file__).parent.parent.parent.parent
+ANALYSIS_RULES_PATH = _ROOT / settings.prompts_dir / "analyze.md"
+BID_WRITER_RULES_PATH = _ROOT / settings.prompts_dir / "bid_writer.md"
 
 # Fallback chains (primary model comes from settings)
 ANALYSIS_FALLBACK_MODELS = ["gemini-2.5-pro"]
@@ -224,6 +225,7 @@ def _calculate_amount(
     budget_min_usd: float,
     budget_max_usd: float,
     min_daily_rate: int = 100,
+    bid_adjustment: int = -10,
 ) -> Optional[float]:
     """Deterministic pricing formula.
 
@@ -233,18 +235,20 @@ def _calculate_amount(
         budget_min_usd: Client's minimum budget in USD
         budget_max_usd: Client's maximum budget in USD
         min_daily_rate: Minimum USD per day (default 100)
+        bid_adjustment: % above/below market (-10 = 10% below, 0 = at market, +10 = 10% above)
 
     Returns:
         Bid amount in USD, rounded to nearest $10.
         Returns None if market price is below our minimum daily rate (→ SKIP).
     """
     floor = days * min_daily_rate
+    multiplier = 1 + bid_adjustment / 100
 
     if avg_bid_usd and avg_bid_usd > 0:
-        target = avg_bid_usd * 0.90                              # 10% below average bid
+        target = avg_bid_usd * multiplier
     else:
         midpoint = ((budget_min_usd or 0) + (budget_max_usd or 0)) / 2
-        target = midpoint * 0.90                                 # 10% below budget midpoint
+        target = midpoint * multiplier
 
     if target < floor:
         logger.info(
@@ -263,6 +267,7 @@ def write_bid(
     summary: str,
     amount: float,
     period: int,
+    owner_username: str = "",
 ) -> tuple[Optional[str], Optional[float]]:
     """Call 2: Write bid text for a project that passed feasibility.
 
@@ -270,11 +275,14 @@ def write_bid(
         summary: SUMMARY from Call 1 (context for the bid writer)
         amount: Pre-calculated bid amount (DO NOT mention in bid text)
         period: Working days (DO NOT mention in bid text)
+        owner_username: Freelancer username of the client (optional, for personalization)
 
     Returns:
         Tuple of (bid_text, fair_price). bid_text is None if the call failed.
     """
     rules = _load_prompt(BID_WRITER_RULES_PATH)
+
+    client_line = f"\nCLIENT USERNAME: {owner_username}" if owner_username else ""
 
     prompt = f"""{rules}
 
@@ -282,7 +290,7 @@ def write_bid(
 
 Write a bid for this project. Follow ALL rules above.
 
-PROJECT TITLE: {title}
+PROJECT TITLE: {title}{client_line}
 
 PROJECT DESCRIPTION:
 {description}
@@ -387,21 +395,29 @@ def analyze_project(
     budget_min_usd: float = 0,
     budget_max_usd: float = 0,
     min_daily_rate: int = 100,
+    owner_username: str = "",
+    bid_adjustment: int = -10,
+    feasibility: Optional[dict] = None,
 ) -> Optional[AnalysisResult]:
     """Orchestrate the two-call analysis pipeline.
 
-    Call 1: analyze_feasibility → VERDICT / DAYS / SUMMARY
+    Call 1: analyze_feasibility → VERDICT / DAYS / SUMMARY  (skipped if feasibility provided)
     Code:   _calculate_amount → AMOUNT
     Call 2: write_bid → BID text
 
+    Args:
+        feasibility: Pre-computed Call 1 result {verdict, days, summary} from shared cache.
+                     If provided, Call 1 is skipped entirely.
+
     Returns AnalysisResult or None if a call failed.
     """
-    # --- Call 1: Feasibility ---
-    feasibility = analyze_feasibility(
-        project_id, title, description, budget_str, avg_bid_usd, bid_count
-    )
-    if not feasibility:
-        return None
+    # --- Call 1: Feasibility (skip if cached result provided) ---
+    if feasibility is None:
+        feasibility = analyze_feasibility(
+            project_id, title, description, budget_str, avg_bid_usd, bid_count
+        )
+        if not feasibility:
+            return None
 
     if feasibility["verdict"] == "SKIP":
         return AnalysisResult(
@@ -415,7 +431,7 @@ def analyze_project(
 
     # --- Pricing (deterministic) ---
     days = max(feasibility["days"], 1)
-    amount = _calculate_amount(days, avg_bid_usd, budget_min_usd, budget_max_usd, min_daily_rate)
+    amount = _calculate_amount(days, avg_bid_usd, budget_min_usd, budget_max_usd, min_daily_rate, bid_adjustment)
     if amount is None:
         return AnalysisResult(
             verdict="SKIP",
@@ -430,6 +446,7 @@ def analyze_project(
     bid_text, fair_price = write_bid(
         project_id, title, description,
         feasibility["summary"], amount, days,
+        owner_username=owner_username,
     )
     if not bid_text:
         logger.error(f"Bid writing failed for project {project_id}")
@@ -456,6 +473,8 @@ def force_bid_analysis(
     budget_min_usd: float = 0,
     budget_max_usd: float = 0,
     min_daily_rate: int = 100,
+    owner_username: str = "",
+    bid_adjustment: int = -10,
 ) -> Optional[AnalysisResult]:
     """Force generate a bid regardless of SKIP verdict (user clicked 'Ask for Bid').
 
@@ -475,7 +494,7 @@ def force_bid_analysis(
         logger.warning(f"Force bid: Call 1 failed for {project_id}, using default period={days}")
 
     # Pricing — for forced bids, use floor if market is below minimum
-    amount = _calculate_amount(days, avg_bid_usd, budget_min_usd, budget_max_usd, min_daily_rate)
+    amount = _calculate_amount(days, avg_bid_usd, budget_min_usd, budget_max_usd, min_daily_rate, bid_adjustment)
     if amount is None:
         amount = round((days * min_daily_rate) / 10) * 10
         logger.info(f"Force bid: market below floor, using floor ${amount:.0f}")
@@ -483,6 +502,7 @@ def force_bid_analysis(
     # Call 2: write bid
     bid_text, fair_price = write_bid(
         project_id, title, description, summary, amount, days,
+        owner_username=owner_username,
     )
     if not bid_text:
         logger.error(f"Force bid: Call 2 failed for project {project_id}")

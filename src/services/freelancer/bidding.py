@@ -375,25 +375,17 @@ class BiddingService:
         Uses PUT ?action=retract (query param, not JSON body).
         """
         try:
-            import requests
-            from src.config import settings
-            r = requests.put(
-                f"https://www.freelancer.com/api/projects/0.1/bids/{bid_id}/",
-                headers={
-                    "Freelancer-OAuth-V1": settings.freelancer_oauth_token,
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
+            response = self._client.put(
+                f"/projects/0.1/bids/{bid_id}/",
                 params={"action": "retract"},
-                timeout=30,
             )
-            data = r.json()
-            if data.get("status") == "success":
+            if response.get("status") == "success":
                 logger.info(f"Bid {bid_id} retracted successfully")
                 return BidResult(success=True, message="Bid retracted successfully", bid_id=bid_id)
             else:
-                error_msg = data.get("message", "Unknown error")
+                error_msg = response.get("message", "Unknown error")
                 logger.error(f"Retract bid {bid_id} failed: {error_msg}")
-                return BidResult(success=False, message=error_msg, error_code=data.get("error_code"))
+                return BidResult(success=False, message=error_msg, error_code=response.get("error_code"))
         except Exception as e:
             logger.error(f"Exception retracting bid {bid_id}: {e}")
             return BidResult(success=False, message=str(e))

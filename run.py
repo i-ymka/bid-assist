@@ -11,11 +11,58 @@ This single process handles:
 - Telegram bot for notifications and bid placement
 """
 
+import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 from datetime import datetime, timedelta
+from functools import partial
+from pathlib import Path
+
+# Parse --env before any src imports so Settings picks up the right file
+_arg_parser = argparse.ArgumentParser(add_help=False)
+_arg_parser.add_argument("--env", default=None)
+_known, _ = _arg_parser.parse_known_args()
+
+if _known.env is None:
+    # No --env given → launch both accounts as subprocesses
+    import subprocess
+    import threading
+
+    _ACCOUNTS = {"yehia": ".env.yehia", "ymka": ".env.ymka"}
+
+    def _stream(proc, prefix):
+        for line in iter(proc.stdout.readline, b""):
+            sys.stdout.write(f"[{prefix}] {line.decode(errors='replace')}")
+            sys.stdout.flush()
+
+    _procs = {
+        name: subprocess.Popen(
+            [sys.executable, __file__, "--env", env_file],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        for name, env_file in _ACCOUNTS.items()
+    }
+
+    for _name, _proc in _procs.items():
+        threading.Thread(target=_stream, args=(_proc, _name), daemon=True).start()
+
+    try:
+        for _proc in _procs.values():
+            _proc.wait()
+    except KeyboardInterrupt:
+        print("\nShutting down all accounts...")
+        for _proc in _procs.values():
+            _proc.terminate()
+        for _proc in _procs.values():
+            _proc.wait()
+
+    sys.exit(0)
+
+os.environ["ENV_FILE"] = _known.env
 
 from telegram import BotCommand
 from telegram.ext import Application
@@ -26,7 +73,8 @@ from src.services.freelancer import FreelancerClient, ProjectService, BiddingSer
 from src.services.storage import ProjectRepository
 from src.services.telegram.handlers import setup_handlers
 from src.services.telegram.notifier import Notifier
-from src.services.ai.gemini_analyzer import analyze_project
+from src.services.ai.gemini_analyzer import analyze_project, analyze_feasibility
+from src.services.storage.shared_repository import SharedAnalysisRepository
 from src.models import AIAnalysis
 from src.models.bid import Bid, Verdict
 from src.filters import CountryFilter, BudgetFilter, BlacklistFilter
@@ -125,9 +173,10 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                         filtered_count += 1
                         continue
 
-                # Apply max bid count filter
-                if project.bid_stats.bid_count > settings.max_bid_count:
-                    logger.info(f"FILTERED project {project.id}: Too many bids ({project.bid_stats.bid_count} > {settings.max_bid_count})")
+                # Apply max bid count filter (early gate to avoid wasting AI calls)
+                max_bids = repo.get_max_bid_count()
+                if project.bid_stats.bid_count > max_bids:
+                    logger.info(f"FILTERED project {project.id}: Too many bids ({project.bid_stats.bid_count} > {max_bids})")
                     repo.add_processed_project(project.id)
                     filtered_count += 1
                     continue
@@ -211,6 +260,8 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                     url=project.url,
                     time_submitted=project.time_submitted,
                     skill_names=skill_names,
+                    owner_username=project.owner.username,
+                    is_preferred_only=project.is_preferred_only,
                 )
                 new_count += 1
 
@@ -237,7 +288,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
             await asyncio.sleep(30)
 
 
-async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
+async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo: SharedAnalysisRepository):
     """Background task that analyzes projects with Gemini AI."""
     logger.info("Analysis loop started")
 
@@ -256,10 +307,15 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                 continue
 
             project_id = project_data["project_id"]
-            logger.info(f"Analyzing: {project_data['title'][:50]}...")
 
-            # Mark as analyzing
-            repo.mark_queue_status(project_id, "analyzing")
+            # Skip preferred-only projects before spending AI tokens
+            if project_data.get("is_preferred_only"):
+                logger.info(f"SKIPPED project {project_id}: preferred freelancer only (stored in queue)")
+                repo.remove_from_queue(project_id)
+                repo.add_processed_project(project_id)
+                continue
+
+            logger.info(f"Analyzing: {project_data['title'][:50]}...")
 
             # Format budget string
             budget_min = project_data.get("budget_min", 0)
@@ -284,21 +340,62 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
             else:
                 budget_str = "Not specified"
 
-            # Run Gemini analysis (blocking, run in thread pool)
-            min_daily_rate = repo.get_min_daily_rate()
+            # --- Shared analysis cache: avoid duplicate Call 1 across accounts ---
             loop = asyncio.get_event_loop()
+            cached_feasibility = shared_repo.get_result(project_id)
+
+            if cached_feasibility is None:
+                # No cached result — try to claim the Call 1 slot
+                claimed = shared_repo.try_claim(project_id)
+                if not claimed:
+                    # Another account is currently running Call 1 for this project — defer
+                    logger.info(f"Project {project_id}: Call 1 deferred (claimed by another account, retrying next cycle)")
+                    await asyncio.sleep(5)
+                    continue
+
+                # We own the slot — run Call 1 exclusively
+                logger.info(f"Project {project_id}: running Call 1 (shared cache miss)")
+                repo.mark_queue_status(project_id, "analyzing")
+                raw_feasibility = await loop.run_in_executor(
+                    None, analyze_feasibility,
+                    project_id, project_data["title"], project_data["description"],
+                    budget_str, avg_bid_usd, bid_count,
+                )
+                if raw_feasibility:
+                    shared_repo.store_result(
+                        project_id,
+                        raw_feasibility["verdict"],
+                        raw_feasibility.get("days", 1),
+                        raw_feasibility.get("summary", ""),
+                    )
+                    cached_feasibility = raw_feasibility
+                else:
+                    # Call 1 failed — release slot so other accounts can retry later
+                    shared_repo.release_claim(project_id)
+            else:
+                logger.info(f"Project {project_id}: using cached Call 1 result (verdict={cached_feasibility['verdict']})")
+                repo.mark_queue_status(project_id, "analyzing")
+
+            # Run Gemini analysis (Call 2 always per-account; Call 1 skipped if cached)
+            min_daily_rate = repo.get_min_daily_rate()
+            bid_adjustment = repo.get_bid_adjustment()
             result = await loop.run_in_executor(
                 None,
-                analyze_project,
-                project_id,
-                project_data["title"],
-                project_data["description"],
-                budget_str,
-                avg_bid_usd,
-                bid_count,
-                budget_min_usd,
-                budget_max_usd,
-                min_daily_rate,
+                partial(
+                    analyze_project,
+                    project_id,
+                    project_data["title"],
+                    project_data["description"],
+                    budget_str,
+                    avg_bid_usd,
+                    bid_count,
+                    budget_min_usd,
+                    budget_max_usd,
+                    min_daily_rate,
+                    project_data.get("owner_username", ""),
+                    bid_adjustment,
+                    cached_feasibility,  # None → analyze_project runs Call 1 itself (fallback)
+                ),
             )
 
             if not result:
@@ -321,6 +418,14 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
             if result.verdict == "BID":
                 # Check auto-bid mode
                 if repo.is_auto_bid():
+                    # Last-mile competitor check with current DB setting
+                    # (catches cases where setting changed after project was queued)
+                    current_bid_count = project_data.get("bid_count", 0)
+                    max_bids_now = repo.get_max_bid_count()
+                    if current_bid_count > max_bids_now:
+                        logger.info(f"AUTO-BID SKIPPED project {project_id}: {current_bid_count} bids > limit {max_bids_now}")
+                        continue
+
                     # Auto-bid: place bid immediately
                     logger.info(f"AUTO-BID: Placing bid on {project_id} - ${result.amount}")
                     bidding_service = BiddingService()
@@ -423,7 +528,10 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                         else:
                             # Check if error is about bid limit
                             error_lower = bid_result.message.lower()
-                            if "used all" in error_lower or "all of your bids" in error_lower or ("bid" in error_lower and ("limit" in error_lower or "remain" in error_lower or "run out" in error_lower)):
+                            if "preferred freelancer" in error_lower:
+                                # Project became preferred-only after being queued — silent skip
+                                logger.info(f"AUTO-BID SKIPPED project {project_id}: preferred freelancer only (was queued before filter caught it)")
+                            elif "used all" in error_lower or "all of your bids" in error_lower or ("bid" in error_lower and ("limit" in error_lower or "remain" in error_lower or "run out" in error_lower)):
                                 # Disable auto-bid
                                 repo.set_auto_bid(False)
                                 logger.warning("AUTO-BID DISABLED: No bids remaining")
@@ -441,7 +549,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
                                     amount=result.amount,
                                     error=bid_result.message,
                                 )
-                            logger.error(f"AUTO-BID FAILED: {project_id} - {bid_result.message}")
+                                logger.error(f"AUTO-BID FAILED: {project_id} - {bid_result.message}")
 
                     # Mark notification as sent in bid_history
                     if notif_sent:
@@ -549,7 +657,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier):
             await asyncio.sleep(10)
 
 
-async def cleanup_loop(repo: ProjectRepository):
+async def cleanup_loop(repo: ProjectRepository, shared_repo: SharedAnalysisRepository):
     """Background task that cleans up old data."""
     logger.info("Cleanup loop started")
 
@@ -560,7 +668,9 @@ async def cleanup_loop(repo: ProjectRepository):
 
             removed = repo.cleanup_old_queue_items(max_age_hours=24)
             if removed > 0:
-                logger.info(f"Cleaned up {removed} old projects")
+                logger.info(f"Cleaned up {removed} old projects from queue")
+
+            shared_repo.cleanup_stale(max_age_hours=24)
 
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
@@ -581,6 +691,7 @@ async def main():
 
     # Initialize services
     repo = ProjectRepository()
+    shared_repo = SharedAnalysisRepository(Path(settings.db_path).parent / "shared_analysis.db")
     client = FreelancerClient()
     project_service = ProjectService(client)
     bidding_service = BiddingService(client)
@@ -658,8 +769,8 @@ async def main():
     # Start background tasks
     tasks = [
         asyncio.create_task(polling_loop(repo, project_service, bidding_service)),
-        asyncio.create_task(analysis_loop(repo, notifier)),
-        asyncio.create_task(cleanup_loop(repo)),
+        asyncio.create_task(analysis_loop(repo, notifier, shared_repo)),
+        asyncio.create_task(cleanup_loop(repo, shared_repo)),
     ]
 
     # Wait for shutdown signal

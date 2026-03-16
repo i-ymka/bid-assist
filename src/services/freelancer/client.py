@@ -100,9 +100,9 @@ class FreelancerClient:
         """Make a POST request."""
         return self._request("POST", endpoint, json_data=data)
 
-    def put(self, endpoint: str, data: Dict = None) -> Dict[str, Any]:
+    def put(self, endpoint: str, data: Dict = None, params: Dict = None) -> Dict[str, Any]:
         """Make a PUT request."""
-        return self._request("PUT", endpoint, json_data=data)
+        return self._request("PUT", endpoint, params=params, json_data=data)
 
     def delete(self, endpoint: str) -> Dict[str, Any]:
         """Make a DELETE request."""

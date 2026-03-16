@@ -4,6 +4,7 @@
 # Secrets and local configuration
 # ================================================================
 .env
+.env.*
 *.env.local
 
 # ================================================================
@@ -47,13 +48,13 @@ data/*
 !data/.gitkeep
 logs/*
 !logs/.gitkeep
+*.log
 
 # ================================================================
 # Project docs and prompts (internal, not for repo)
 # ================================================================
 docs/
-prompts/*
-!prompts/pal_rules.md.example
+prompts_*/*
 
 # ================================================================
 # IDE and editor files

@@ -501,14 +501,15 @@ def _fetch_bid_stats_sync() -> dict:
                 # losses (tiny non-representative sample) → wildly inconsistent numbers.
                 if outcome == "LOSS":
                     ca = cached_row.get("winner_amount")
+                    cp = cached_row.get("winner_proposal")
                     cpl = cached_row.get("winner_proposal_len")
                     cr = cached_row.get("winner_reviews")
                     if ca is not None or cpl is not None or cr is not None:
                         # Reconstruct a detail-compatible dict from cached values.
-                        # winner_proposal is a placeholder of the correct length (metrics need length, not text).
+                        # Use stored text if available; fall back to length placeholder for metrics only.
                         detail = {
                             "winner_amount": ca or 0,
-                            "winner_proposal": "x" * (cpl or 0),
+                            "winner_proposal": cp if cp is not None else "x" * (cpl or 0),
                             "winner_profile": {"reviews": cr},
                         }
                     else:
@@ -837,10 +838,62 @@ async def cmd_bid_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_bidstats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle bidstats period selection."""
+    """Handle bidstats period selection and more_losses pagination."""
     query = update.callback_query
     await query.answer()
-    period = query.data.split(":")[1]  # "alltime" or "weekly"
+    parts = query.data.split(":")
+    action = parts[1]  # "alltime", "weekly", or "more_losses"
+
+    # Handle "Show more" losses pagination
+    if action == "more_losses":
+        period = parts[2]
+        offset = int(parts[3])
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, _fetch_bid_stats_sync)
+        except Exception as e:
+            await query.message.reply_text(f"❌ Error: {e}")
+            return
+
+        if period == "weekly":
+            cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+            subset = _build_weekly_subset(data, cutoff)
+        else:
+            subset = data
+        all_losses = (
+            [(loss, False) for loss in subset.get("losses_visible", [])]
+            + [(loss, True) for loss in subset.get("losses_sealed", [])]
+        )
+        my_profile = data.get("my_profile", {})
+        batch = all_losses[offset:offset + _MAX_LOSS_CARDS]
+        for loss, is_sealed in batch:
+            try:
+                card = _build_loss_card(loss, is_sealed=is_sealed, my_profile=my_profile)
+                await query.message.reply_text(card, parse_mode="HTML", disable_web_page_preview=True)
+            except telegram_error.TelegramError as e:
+                logger.error(f"Failed to send loss card: {e}")
+
+        new_offset = offset + _MAX_LOSS_CARDS
+        if new_offset < len(all_losses):
+            await query.message.reply_text(
+                f"<i>Showing {new_offset} of {len(all_losses)} losses</i>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        f"Show more ↓ ({len(all_losses) - new_offset} left)",
+                        callback_data=f"bidstats:more_losses:{period}:{new_offset}"
+                    )
+                ]])
+            )
+        else:
+            await query.message.reply_text(
+                f"<i>Showing all {len(all_losses)} losses</i>",
+                parse_mode="HTML",
+            )
+        return
+
+    period = parts[1]  # "alltime" or "weekly"
 
     await query.edit_message_text("⏳ Fetching bid statistics, please wait...")
 
@@ -885,9 +938,16 @@ async def handle_bidstats_callback(update: Update, context: ContextTypes.DEFAULT
                     except telegram_error.TelegramError as e:
                         logger.error(f"Failed to send loss card: {e}")
                 if len(all_losses) > _MAX_LOSS_CARDS:
+                    remaining = len(all_losses) - _MAX_LOSS_CARDS
                     await query.message.reply_text(
                         f"<i>Showing {_MAX_LOSS_CARDS} of {len(all_losses)} losses</i>",
                         parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton(
+                                f"Show more ↓ ({remaining} left)",
+                                callback_data=f"bidstats:more_losses:weekly:{_MAX_LOSS_CARDS}"
+                            )
+                        ]])
                     )
 
             # Compact summary
@@ -916,6 +976,12 @@ _POLL_PRESETS = [60, 120, 180, 300, 600]
 # Min daily rate presets (USD/day)
 _DAILY_RATE_PRESETS = [50, 75, 100, 125, 150, 200]
 
+# Max competitor bid count presets (999 = effectively unlimited)
+_MAX_BID_COUNT_PRESETS = [25, 50, 75, 100, 150, 999]
+
+# Bid adjustment presets (% relative to market avg, negative = underbid)
+_BID_ADJUSTMENT_PRESETS = [-50, -25, -10, 0, 10, 25]
+
 
 def _build_settings_message(repo: ProjectRepository) -> str:
     """Build the settings message text."""
@@ -930,6 +996,8 @@ def _build_settings_message(repo: ProjectRepository) -> str:
     skipped_status = "✅ Yes" if repo.get_receive_skipped() else "❌ No"
 
     min_daily_rate = repo.get_min_daily_rate()
+    bid_adjustment = repo.get_bid_adjustment()
+    adj_sign = "+" if bid_adjustment > 0 else ""
     return (
         f"⚙️ <b>Settings</b>\n\n"
         f"<b>Filters:</b>\n"
@@ -942,7 +1010,8 @@ def _build_settings_message(repo: ProjectRepository) -> str:
         f"• Preferred-only: {preferred_status}\n\n"
         f"<b>Bidding:</b>\n"
         f"• Auto-bid: {auto_bid_status}\n"
-        f"• Min daily rate: ${min_daily_rate}/day\n\n"
+        f"• Min daily rate: ${min_daily_rate}/day\n"
+        f"• Bid adjustment: {adj_sign}{bid_adjustment}% from market\n\n"
         f"<b>Notifications:</b>\n"
         f"• Show skipped: {skipped_status}"
     )
@@ -958,6 +1027,8 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
     skipped_yn = "✅ Yes" if repo.get_receive_skipped() else "❌ No"
 
     min_daily_rate = repo.get_min_daily_rate()
+    bid_adjustment = repo.get_bid_adjustment()
+    adj_sign = "+" if bid_adjustment > 0 else ""
     keyboard = [
         [
             InlineKeyboardButton(f"💰 Budget: ${state['min_budget']}–${state['max_budget']}", callback_data="settings:budget"),
@@ -972,6 +1043,10 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"Min rate: ${min_daily_rate}/day", callback_data="settings:daily_rate"),
         ],
         [
+            InlineKeyboardButton(f"Bid adj: {adj_sign}{bid_adjustment}%", callback_data="settings:bid_adj"),
+        ],
+        [
+            InlineKeyboardButton(f"Max bids: {repo.get_max_bid_count()} competitors", callback_data="settings:max_bids"),
             InlineKeyboardButton(f"Skipped: {skipped_yn}", callback_data="settings:skip_notif"),
         ],
     ]
@@ -1059,6 +1134,33 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         except ValueError:
             next_idx = 0
         repo.set_min_daily_rate(_DAILY_RATE_PRESETS[next_idx])
+
+        message = _build_settings_message(repo)
+        keyboard = _get_settings_keyboard(repo)
+        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
+
+    elif action == "bid_adj":
+        current = repo.get_bid_adjustment()
+        try:
+            idx = _BID_ADJUSTMENT_PRESETS.index(current)
+            next_idx = (idx + 1) % len(_BID_ADJUSTMENT_PRESETS)
+        except ValueError:
+            next_idx = 0
+        repo.set_bid_adjustment(_BID_ADJUSTMENT_PRESETS[next_idx])
+
+        message = _build_settings_message(repo)
+        keyboard = _get_settings_keyboard(repo)
+        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
+
+    elif action == "max_bids":
+        # Cycle through max competitor bid count presets
+        current = repo.get_max_bid_count()
+        try:
+            idx = _MAX_BID_COUNT_PRESETS.index(current)
+            next_idx = (idx + 1) % len(_MAX_BID_COUNT_PRESETS)
+        except ValueError:
+            next_idx = _MAX_BID_COUNT_PRESETS.index(100)  # default to 100
+        repo.set_max_bid_count(_MAX_BID_COUNT_PRESETS[next_idx])
 
         message = _build_settings_message(repo)
         keyboard = _get_settings_keyboard(repo)
@@ -1416,6 +1518,7 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
         budget_str = "Not specified"
 
     min_daily_rate = repo.get_min_daily_rate()
+    bid_adjustment = repo.get_bid_adjustment()
 
     # Run analysis in thread pool (it's blocking)
     loop = asyncio.get_event_loop()
@@ -1431,6 +1534,8 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
         budget_min_usd,
         budget_max_usd,
         min_daily_rate,
+        project_data.get("owner_username", ""),
+        bid_adjustment,
     )
 
     if not result:
@@ -1581,6 +1686,17 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.edit_message_reply_markup(reply_markup=keyboard)
         except Exception as e:
             logger.warning(f"Could not update keyboard: {e}")
+        return
+
+    # Last-mile competitor check before manual bid placement
+    bid_count_now = bid_data.get("bid_count", 0)
+    max_bids_now = repo.get_max_bid_count()
+    if bid_count_now > max_bids_now:
+        await query.answer("")
+        await query.message.reply_text(
+            f"⚠️ Too many competitors: this project had {bid_count_now} bids when analyzed "
+            f"(your limit: {max_bids_now}). Bid not placed."
+        )
         return
 
     # Show loading indicator via callback answer (doesn't modify message)
