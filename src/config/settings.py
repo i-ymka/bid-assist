@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     default_milestone_pct: int = Field(100, alias="DEFAULT_MILESTONE_PCT")
     min_daily_rate: int = Field(100, alias="MIN_DAILY_RATE")
 
+    # GitHub Integration
+    github_token: str = Field("", alias="GITHUB_TOKEN")
+    github_repo: str = Field("", alias="GITHUB_REPO")
+
     # Database
     db_path: str = Field("data/processed_projects.db", alias="DB_PATH")
 

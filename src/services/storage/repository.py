@@ -262,6 +262,12 @@ class ProjectRepository:
                     ("winner_proposal_len", "INTEGER"),
                     ("winner_proposal", "TEXT"),
                     ("winner_reviews", "INTEGER"),
+                    ("winner_hourly_rate", "REAL"),
+                    ("winner_reg_date", "INTEGER"),
+                    ("winner_earnings_score", "REAL"),
+                    ("winner_portfolio_count", "INTEGER"),
+                    ("my_time_to_bid_sec", "INTEGER"),
+                    ("winner_time_to_bid_sec", "INTEGER"),
                 ]:
                     try:
                         self._conn.execute(f"ALTER TABLE bid_outcomes ADD COLUMN {_col} {_coltype}")
@@ -588,13 +594,14 @@ class ProjectRepository:
         """Get cached outcome plus winner comparison data from bid_outcomes.
 
         Returns:
-            Dict with keys: outcome, winner_amount, winner_proposal_len, winner_proposal, winner_reviews.
-            None if no row found.
+            Dict with all cached winner fields. None if no row found.
         """
         try:
             cursor = self._conn.cursor()
             cursor.execute(
-                """SELECT outcome, winner_amount, winner_proposal_len, winner_proposal, winner_reviews
+                """SELECT outcome, winner_amount, winner_proposal_len, winner_proposal, winner_reviews,
+                          winner_hourly_rate, winner_reg_date, winner_earnings_score,
+                          winner_portfolio_count, my_time_to_bid_sec, winner_time_to_bid_sec
                    FROM bid_outcomes WHERE project_id = ?""",
                 (project_id,),
             )
@@ -607,6 +614,12 @@ class ProjectRepository:
                 "winner_proposal_len": row["winner_proposal_len"],
                 "winner_proposal": row["winner_proposal"],
                 "winner_reviews": row["winner_reviews"],
+                "winner_hourly_rate": row["winner_hourly_rate"],
+                "winner_reg_date": row["winner_reg_date"],
+                "winner_earnings_score": row["winner_earnings_score"],
+                "winner_portfolio_count": row["winner_portfolio_count"],
+                "my_time_to_bid_sec": row["my_time_to_bid_sec"],
+                "winner_time_to_bid_sec": row["winner_time_to_bid_sec"],
             }
         except sqlite3.Error:
             return None
@@ -617,14 +630,22 @@ class ProjectRepository:
         Args:
             project_id: Freelancer project ID.
             outcome: Outcome string ("LOSS", "MY_WIN", "NO_WINNER", "LOSS_SEALED", "ERROR").
-            winner_detail: Dict with keys winner_amount, winner_proposal, winner_profile (for LOSS).
-                           winner_proposal_len is derived from len(winner_proposal).
+            winner_detail: Dict with winner data (for LOSS). Supported keys:
+                           winner_amount, winner_proposal, winner_profile,
+                           winner_hourly_rate, winner_reg_date, winner_earnings_score,
+                           winner_portfolio_count, my_time_to_bid_sec, winner_time_to_bid_sec.
         """
         try:
             winner_amount = None
             winner_proposal_len = None
             winner_proposal_text = None
             winner_reviews = None
+            winner_hourly_rate = None
+            winner_reg_date = None
+            winner_earnings_score = None
+            winner_portfolio_count = None
+            my_time_to_bid_sec = None
+            winner_time_to_bid_sec = None
             if winner_detail:
                 winner_amount = winner_detail.get("winner_amount")
                 proposal = winner_detail.get("winner_proposal") or ""
@@ -634,18 +655,36 @@ class ProjectRepository:
                 elif proposal:
                     winner_proposal_len = len(proposal)
                 winner_reviews = (winner_detail.get("winner_profile") or {}).get("reviews")
+                winner_hourly_rate = winner_detail.get("winner_hourly_rate")
+                winner_reg_date = winner_detail.get("winner_reg_date")
+                winner_earnings_score = winner_detail.get("winner_earnings_score")
+                winner_portfolio_count = winner_detail.get("winner_portfolio_count")
+                my_time_to_bid_sec = winner_detail.get("my_time_to_bid_sec")
+                winner_time_to_bid_sec = winner_detail.get("winner_time_to_bid_sec")
             self._conn.execute(
                 """INSERT INTO bid_outcomes
-                       (project_id, outcome, updated_at, winner_amount, winner_proposal_len, winner_proposal, winner_reviews)
-                   VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+                       (project_id, outcome, updated_at,
+                        winner_amount, winner_proposal_len, winner_proposal, winner_reviews,
+                        winner_hourly_rate, winner_reg_date, winner_earnings_score,
+                        winner_portfolio_count, my_time_to_bid_sec, winner_time_to_bid_sec)
+                   VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(project_id) DO UPDATE SET
                        outcome = excluded.outcome,
                        updated_at = excluded.updated_at,
                        winner_amount = COALESCE(excluded.winner_amount, winner_amount),
                        winner_proposal_len = COALESCE(excluded.winner_proposal_len, winner_proposal_len),
                        winner_proposal = COALESCE(excluded.winner_proposal, winner_proposal),
-                       winner_reviews = COALESCE(excluded.winner_reviews, winner_reviews)""",
-                (project_id, outcome, winner_amount, winner_proposal_len, winner_proposal_text, winner_reviews),
+                       winner_reviews = COALESCE(excluded.winner_reviews, winner_reviews),
+                       winner_hourly_rate = COALESCE(excluded.winner_hourly_rate, winner_hourly_rate),
+                       winner_reg_date = COALESCE(excluded.winner_reg_date, winner_reg_date),
+                       winner_earnings_score = COALESCE(excluded.winner_earnings_score, winner_earnings_score),
+                       winner_portfolio_count = COALESCE(excluded.winner_portfolio_count, winner_portfolio_count),
+                       my_time_to_bid_sec = COALESCE(excluded.my_time_to_bid_sec, my_time_to_bid_sec),
+                       winner_time_to_bid_sec = COALESCE(excluded.winner_time_to_bid_sec, winner_time_to_bid_sec)""",
+                (project_id, outcome,
+                 winner_amount, winner_proposal_len, winner_proposal_text, winner_reviews,
+                 winner_hourly_rate, winner_reg_date, winner_earnings_score,
+                 winner_portfolio_count, my_time_to_bid_sec, winner_time_to_bid_sec),
             )
             self._conn.commit()
         except sqlite3.Error as e:

@@ -339,12 +339,23 @@ def _classify_project(project_id, project_service, client, my_user_id):
             outcome = "MY_WIN"
         elif winner_amount > 0:
             outcome = "LOSS"
-            # Fetch winner profile
+            winner_user_id = winning_bid.get("bidder_id")
+            # Fetch winner profile (extended fields)
             winner_profile = {}
+            winner_hourly_rate = None
+            winner_reg_date = None
+            winner_earnings_score = None
+            winner_portfolio_count = None
             try:
                 resp = client.get(
-                    f"/users/0.1/users/{winning_bid['bidder_id']}/",
-                    params={"reputation": "true", "country_details": "true"},
+                    f"/users/0.1/users/{winner_user_id}/",
+                    params={
+                        "reputation": "true",
+                        "country_details": "true",
+                        "hourly_rate": "true",
+                        "registration_date": "true",
+                        "earnings": "true",
+                    },
                 )
                 wr = resp.get("result", {})
                 if wr:
@@ -357,12 +368,39 @@ def _classify_project(project_id, project_service, client, my_user_id):
                         "reviews": rep.get("reviews"),
                         "completion_rate": rep.get("completion_rate"),
                     }
+                    winner_hourly_rate = wr.get("hourly_rate")
+                    winner_reg_date = wr.get("registration_date")
+                    winner_earnings_score = rep.get("earnings_score")
             except Exception as e:
                 logger.warning(f"Could not fetch winner profile: {e}")
+            # Portfolio count (separate API call)
+            try:
+                winner_portfolio_count = project_service.get_portfolio_count(winner_user_id)
+            except Exception as e:
+                logger.debug(f"Portfolio count fetch failed for winner {winner_user_id}: {e}")
+            # Time to bid calculations
+            project_ts = project.time_submitted.timestamp() if project.time_submitted else None
+            winner_bid_ts = winning_bid.get("submitdate")
+            winner_time_to_bid_sec = None
+            if project_ts and winner_bid_ts:
+                winner_time_to_bid_sec = int(winner_bid_ts - project_ts)
+            # My bid timing
+            my_bid = next((b for b in bids if b.get("bidder_id") == my_user_id), None)
+            my_time_to_bid_sec = None
+            if my_bid and project_ts:
+                my_bid_ts = my_bid.get("submitdate")
+                if my_bid_ts:
+                    my_time_to_bid_sec = int(my_bid_ts - project_ts)
             detail = {
                 "winner_amount": winner_amount,
                 "winner_profile": winner_profile,
                 "winner_proposal": winning_bid.get("description", "") or "",
+                "winner_hourly_rate": winner_hourly_rate,
+                "winner_reg_date": winner_reg_date,
+                "winner_earnings_score": winner_earnings_score,
+                "winner_portfolio_count": winner_portfolio_count,
+                "my_time_to_bid_sec": my_time_to_bid_sec,
+                "winner_time_to_bid_sec": winner_time_to_bid_sec,
             }
         else:
             outcome = "LOSS_SEALED"
@@ -404,23 +442,39 @@ def _fetch_bid_stats_sync() -> dict:
     my_user_id = client.get_user_id()
     repo = ProjectRepository()
 
-    # Fetch my own profile once
+    # Fetch my own profile once (extended fields for My Profile header)
     my_profile = {}
     try:
         resp = client.get(
             f"/users/0.1/users/{my_user_id}/",
-            params={"reputation": "true", "country_details": "true"},
+            params={
+                "reputation": "true",
+                "country_details": "true",
+                "hourly_rate": "true",
+                "registration_date": "true",
+                "earnings": "true",
+            },
         )
         mr = resp.get("result", {})
         if mr:
             rep = mr.get("reputation", {}).get("entire_history", {})
             loc = mr.get("location", {})
+            reg_date = mr.get("registration_date")
+            import time as _time
+            years_on = round((_time.time() - reg_date) / (365.25 * 86400), 1) if reg_date else None
             my_profile = {
                 "username": mr.get("username", ""),
                 "country": loc.get("country", {}).get("name", "N/A") if loc else "N/A",
                 "rating": rep.get("overall"),
                 "reviews": rep.get("reviews"),
                 "completion_rate": rep.get("completion_rate"),
+                "hourly_rate": mr.get("hourly_rate"),
+                "years_on_platform": years_on,
+                "earnings_score": rep.get("earnings_score"),
+                "portfolio_count": project_service.get_portfolio_count(my_user_id),
+                "bid_adjustment": repo.get_bid_adjustment(),
+                "min_daily_rate": repo.get_min_daily_rate(),
+                "prompts_dir": settings.prompts_dir,
             }
     except Exception as e:
         logger.warning(f"Could not fetch own profile: {e}")
@@ -511,6 +565,12 @@ def _fetch_bid_stats_sync() -> dict:
                             "winner_amount": ca or 0,
                             "winner_proposal": cp if cp is not None else "x" * (cpl or 0),
                             "winner_profile": {"reviews": cr},
+                            "winner_hourly_rate": cached_row.get("winner_hourly_rate"),
+                            "winner_reg_date": cached_row.get("winner_reg_date"),
+                            "winner_earnings_score": cached_row.get("winner_earnings_score"),
+                            "winner_portfolio_count": cached_row.get("winner_portfolio_count"),
+                            "my_time_to_bid_sec": cached_row.get("my_time_to_bid_sec"),
+                            "winner_time_to_bid_sec": cached_row.get("winner_time_to_bid_sec"),
                         }
                     else:
                         # No winner data yet (rows classified before this fix) — re-classify once to backfill.
@@ -713,6 +773,21 @@ def _build_loss_card(loss: dict, is_sealed: bool = False, my_profile: dict = Non
     if our_proposal:
         lines.append(f"<blockquote>{our_proposal}</blockquote>")
 
+    # — TIMING —
+    def _fmt_time(secs):
+        if secs is None:
+            return None
+        secs = max(0, secs)
+        if secs < 3600:
+            return f"{secs // 60}min"
+        return f"{secs // 3600}h {(secs % 3600) // 60}m"
+
+    my_ttb = _fmt_time(loss.get("my_time_to_bid_sec"))
+    win_ttb = _fmt_time(loss.get("winner_time_to_bid_sec"))
+    if my_ttb or win_ttb:
+        timing_line = f"⏱ You: {my_ttb or '?'} | Winner: {win_ttb or '?'}"
+        lines.append(timing_line)
+
     # — WINNER —
     if is_sealed:
         lines.append("")
@@ -732,6 +807,25 @@ def _build_loss_card(loss: dict, is_sealed: bool = False, my_profile: dict = Non
         if winner_stats:
             winner_header += f"\n{winner_stats}"
         lines.append(winner_header)
+
+        # Extended winner profile
+        ext_parts = []
+        hourly = loss.get("winner_hourly_rate")
+        if hourly is not None:
+            ext_parts.append(f"${hourly:.0f}/hr")
+        reg_date = loss.get("winner_reg_date")
+        if reg_date:
+            import time as _time
+            years = (_time.time() - reg_date) / (365.25 * 86400)
+            ext_parts.append(f"{years:.1f}yr on platform")
+        escore = loss.get("winner_earnings_score")
+        if escore is not None:
+            ext_parts.append(f"earnings {escore:.1f}/10")
+        pcount = loss.get("winner_portfolio_count")
+        if pcount is not None:
+            ext_parts.append(f"portfolio: {pcount}")
+        if ext_parts:
+            lines.append(" · ".join(ext_parts))
 
         if winner_proposal:
             lines.append(f"<blockquote>{winner_proposal}</blockquote>")
@@ -893,6 +987,90 @@ async def handle_bidstats_callback(update: Update, context: ContextTypes.DEFAULT
             )
         return
 
+    # Handle "Analyse week" callback (T012)
+    if action == "analyse_week":
+        period = parts[2] if len(parts) > 2 else "weekly"
+        await query.message.reply_text("⏳ Analysing your bids...")
+        try:
+            import asyncio
+            from src.services.ai.gemini_analyzer import analyse_weekly_bids
+            from src.services.github import post_issue
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, _fetch_bid_stats_sync)
+
+            cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+            weekly_data = _build_weekly_subset(data, cutoff)
+            my_profile = data.get("my_profile", {})
+
+            # Build wins/losses lists for analysis
+            wins_for_analysis = []
+            for w in weekly_data.get("wins", []):
+                wins_for_analysis.append({
+                    "title": w.get("title", ""),
+                    "amount": w.get("amount", 0),
+                    "bid_text": w.get("proposal", ""),
+                    "my_time_to_bid_sec": w.get("my_time_to_bid_sec"),
+                })
+            losses_for_analysis = []
+            for lo in weekly_data.get("losses_visible", []):
+                losses_for_analysis.append({
+                    "title": lo.get("title", ""),
+                    "my_amount": lo.get("our_amount", 0),
+                    "winner_amount": lo.get("winner_amount", 0),
+                    "bid_text": lo.get("our_proposal", ""),
+                    "my_time_to_bid_sec": lo.get("my_time_to_bid_sec"),
+                    "winner_time_to_bid_sec": lo.get("winner_time_to_bid_sec"),
+                    "winner_reviews": (lo.get("winner_profile") or {}).get("reviews"),
+                    "winner_hourly_rate": lo.get("winner_hourly_rate"),
+                    "winner_reg_date": lo.get("winner_reg_date"),
+                    "winner_earnings_score": lo.get("winner_earnings_score"),
+                    "winner_portfolio_count": lo.get("winner_portfolio_count"),
+                })
+
+            analysis_text = await loop.run_in_executor(
+                None, analyse_weekly_bids, wins_for_analysis, losses_for_analysis, my_profile
+            )
+
+            if not analysis_text:
+                await query.message.reply_text("❌ AI analysis failed. Try again later.")
+                return
+
+            # Send analysis to Telegram (split if > 4096 chars)
+            MAX_MSG = 4096
+            chunks = [analysis_text[i:i + MAX_MSG] for i in range(0, len(analysis_text), MAX_MSG)]
+            for chunk in chunks:
+                await query.message.reply_text(chunk)
+
+            # Post to GitHub Issues
+            from datetime import date
+            week_str = date.today().strftime("%Y-%m-%d")
+            username = my_profile.get("username", "user")
+            issue_title = f"[AI Analysis] Week of {week_str} — @{username}"
+            issue_body = f"**Period:** last 7 days  \n**Account:** @{username}\n\n{analysis_text}"
+            issue_url = await loop.run_in_executor(
+                None, post_issue,
+                settings.github_token, settings.github_repo,
+                issue_title, issue_body, ["ai-analysis"]
+            )
+
+            if issue_url:
+                await query.message.reply_text(f"🔗 GitHub Issue: {issue_url}")
+                # Append to PROMPT_LOG.md
+                try:
+                    log_path = "docs/PROMPT_LOG.md"
+                    import os
+                    if os.path.exists(log_path):
+                        issue_num = issue_url.rstrip("/").split("/")[-1]
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write(f"\n- [Issue #{issue_num}]({issue_url}) — {week_str}\n")
+                except Exception as log_err:
+                    logger.warning(f"Could not append to PROMPT_LOG.md: {log_err}")
+
+        except Exception as e:
+            logger.error(f"Error in analyse_week: {e}", exc_info=True)
+            await query.message.reply_text(f"❌ Analysis error: {e}")
+        return
+
     period = parts[1]  # "alltime" or "weekly"
 
     await query.edit_message_text("⏳ Fetching bid statistics, please wait...")
@@ -912,20 +1090,63 @@ async def handle_bidstats_callback(update: Update, context: ContextTypes.DEFAULT
             await query.edit_message_text(dashboard, parse_mode="HTML")
 
         else:
-            # Weekly: dashboard + loss cards + compact
+            # Weekly: My profile header + dashboard + loss cards + compact + Analyse button
             cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
             weekly_data = _build_weekly_subset(data, cutoff)
 
             dashboard = _build_dashboard_message(weekly_data)
             await query.edit_message_text(dashboard, parse_mode="HTML")
 
+            # My profile header (T008)
+            my_profile = data.get("my_profile", {})
+            if my_profile:
+                profile_lines = [f"👤 <b>My profile: @{html.escape(my_profile.get('username', '?'))}</b>"]
+                p_parts = []
+                country = my_profile.get("country")
+                if country:
+                    p_parts.append(html.escape(country))
+                rating = my_profile.get("rating")
+                if rating is not None:
+                    p_parts.append(f"⭐{rating:.1f}")
+                reviews = my_profile.get("reviews")
+                if reviews is not None:
+                    p_parts.append(f"{reviews} reviews")
+                cr = my_profile.get("completion_rate")
+                if cr is not None:
+                    p_parts.append(f"{cr * 100:.0f}%")
+                if p_parts:
+                    profile_lines.append(" · ".join(p_parts))
+                ext_parts = []
+                hourly = my_profile.get("hourly_rate")
+                if hourly is not None:
+                    ext_parts.append(f"${hourly:.0f}/hr")
+                yrs = my_profile.get("years_on_platform")
+                if yrs is not None:
+                    ext_parts.append(f"{yrs}yr on platform")
+                escore = my_profile.get("earnings_score")
+                if escore is not None:
+                    ext_parts.append(f"earnings {escore:.1f}/10")
+                pcount = my_profile.get("portfolio_count")
+                if pcount is not None:
+                    ext_parts.append(f"portfolio: {pcount}")
+                if ext_parts:
+                    profile_lines.append(" · ".join(ext_parts))
+                settings_parts = []
+                adj = my_profile.get("bid_adjustment")
+                if adj is not None:
+                    settings_parts.append(f"bid adj: {adj:+d}%")
+                mdr = my_profile.get("min_daily_rate")
+                if mdr is not None:
+                    settings_parts.append(f"min ${mdr}/day")
+                if settings_parts:
+                    profile_lines.append("⚙️ " + " · ".join(settings_parts))
+                await query.message.reply_text("\n".join(profile_lines), parse_mode="HTML")
+
             # Loss cards (most recent N)
             all_losses = (
                 [(loss, False) for loss in weekly_data["losses_visible"]]
                 + [(loss, True) for loss in weekly_data["losses_sealed"]]
             )
-
-            my_profile = data.get("my_profile", {})
 
             if all_losses:
                 shown = all_losses[:_MAX_LOSS_CARDS]
@@ -954,6 +1175,14 @@ async def handle_bidstats_callback(update: Update, context: ContextTypes.DEFAULT
             compact = _build_compact_summary(weekly_data)
             if compact:
                 await query.message.reply_text(compact, parse_mode="HTML", disable_web_page_preview=True)
+
+            # Analyse week button (T009)
+            await query.message.reply_text(
+                "Ready to analyse this week's bids?",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📊 Analyse week", callback_data="bidstats:analyse_week:weekly")
+                ]])
+            )
 
     except Exception as e:
         logger.error(f"Error in /bidstats: {e}", exc_info=True)

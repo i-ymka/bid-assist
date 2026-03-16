@@ -518,3 +518,90 @@ def force_bid_analysis(
         raw_response="",
         fair_price=fair_price,
     )
+
+
+def analyse_weekly_bids(
+    wins: list[dict],
+    losses: list[dict],
+    my_profile: dict,
+) -> Optional[str]:
+    """Run Gemini analysis on a week's worth of bids and return actionable suggestions.
+
+    Args:
+        wins: List of win dicts (project_id, title, amount, bid_text, my_time_to_bid_sec).
+        losses: List of loss dicts (same + winner_* profile fields).
+        my_profile: Dict with my current profile stats and settings.
+
+    Returns:
+        Analysis text (str) or None if Gemini CLI failed.
+    """
+    def _fmt_time(secs):
+        if secs is None:
+            return "?"
+        if secs < 3600:
+            return f"{secs // 60}min"
+        return f"{secs // 3600}h {(secs % 3600) // 60}m"
+
+    wins_block = ""
+    for w in wins:
+        wins_block += (
+            f"- [{w.get('title', 'N/A')}] Amount: ${w.get('amount', '?')} | "
+            f"Time to bid: {_fmt_time(w.get('my_time_to_bid_sec'))}\n"
+            f"  Bid excerpt: {str(w.get('bid_text', ''))[:300]}\n"
+        )
+
+    losses_block = ""
+    for lo in losses:
+        reg_date = lo.get("winner_reg_date")
+        years_on = ""
+        if reg_date:
+            import time as _time
+            years = (_time.time() - reg_date) / (365.25 * 86400)
+            years_on = f"{years:.1f}yr"
+        losses_block += (
+            f"- [{lo.get('title', 'N/A')}] My bid: ${lo.get('my_amount', '?')} | "
+            f"Winner bid: ${lo.get('winner_amount', '?')}\n"
+            f"  Time to bid — me: {_fmt_time(lo.get('my_time_to_bid_sec'))} | "
+            f"winner: {_fmt_time(lo.get('winner_time_to_bid_sec'))}\n"
+            f"  Winner profile: {lo.get('winner_reviews', '?')} reviews | "
+            f"${lo.get('winner_hourly_rate', '?')}/hr | {years_on} on platform | "
+            f"earnings score {lo.get('winner_earnings_score', '?')}/10 | "
+            f"portfolio: {lo.get('winner_portfolio_count', '?')} items\n"
+            f"  My bid excerpt: {str(lo.get('bid_text', ''))[:300]}\n"
+        )
+
+    profile_block = (
+        f"Username: {my_profile.get('username', '?')} | "
+        f"Country: {my_profile.get('country', '?')} | "
+        f"Rating: {my_profile.get('rating', '?')} | "
+        f"Reviews: {my_profile.get('reviews', '?')} | "
+        f"Hourly rate: ${my_profile.get('hourly_rate', '?')}/hr | "
+        f"Years on platform: {my_profile.get('years_on_platform', '?')} | "
+        f"Earnings score: {my_profile.get('earnings_score', '?')}/10 | "
+        f"Portfolio: {my_profile.get('portfolio_count', '?')} items\n"
+        f"Settings: bid_adjustment={my_profile.get('bid_adjustment', '?')}% | "
+        f"min_daily_rate=${my_profile.get('min_daily_rate', '?')}/day | "
+        f"prompts_dir={my_profile.get('prompts_dir', '?')}"
+    )
+
+    prompt = f"""You are an expert freelance bid coach. Analyse the following weekly bidding data and provide concrete, actionable improvement suggestions.
+
+=== MY PROFILE ===
+{profile_block}
+
+=== WINS THIS WEEK ({len(wins)}) ===
+{wins_block or '(none)'}
+
+=== LOSSES THIS WEEK ({len(losses)}) ===
+{losses_block or '(none)'}
+
+=== YOUR TASK ===
+1. Identify patterns that distinguish wins from losses (price, speed, bid style, project type, winner profile).
+2. Provide at least 3 numbered, specific improvement suggestions I can act on immediately.
+3. Prioritise suggestions by expected impact (highest first).
+4. Be direct — no fluff. Concrete numbers and examples where possible.
+
+Format: plain text, numbered suggestions, no markdown headers.
+"""
+
+    return _run_gemini_cli(prompt, settings.gemini_model, ANALYSIS_FALLBACK_MODELS, timeout=300)

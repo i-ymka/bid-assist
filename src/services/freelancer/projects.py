@@ -232,3 +232,23 @@ class ProjectService:
         except Exception as e:
             logger.warning(f"Could not fetch owner country for project {project_id}: {e}")
             return None
+
+    def get_portfolio_count(self, user_id: int) -> Optional[int]:
+        """Fetch portfolio item count for a user.
+
+        Args:
+            user_id: Freelancer user ID.
+
+        Returns:
+            Total portfolio count, or None if the API doesn't support it or request fails.
+        """
+        try:
+            response = self._client.get(
+                "/users/0.1/portfolios/",
+                params={"users[]": user_id, "compact": "true", "limit": 0},
+            )
+            result = response.get("result", {})
+            return result.get("total_count")
+        except Exception as e:
+            logger.debug(f"get_portfolio_count({user_id}) failed: {e}")
+            return None
