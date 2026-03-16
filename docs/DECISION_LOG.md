@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-03-17 | [REFACTOR] Промпты: ревизия после 50 бидов без результата
+
+**Суть:**
+- `analyze.md`: веб-поиски 2–4 → 2–8; Zapier → n8n в automation skills; убрана лишняя ремарка из Step 6
+- `bid_writer.md`: убраны STEP 0 anti-bot шаблоны (→ упрощён до "check for special instructions"); удалён MANDATORY WEB SEARCH (bid_writer — быстрая модель, не аналитик); CLIENT NAME строже — только для подробных постов (5+ предложений); CTA "ready to start" → мягкие collaborative вопросы; новые hard constraints: em dash → дефис, одинарные кавычки для кода → двойные; пример починен (3 предложения + логичный CTA)
+- Код: `ProjectOwner.display_name` (из `public_name` API), `owner_display_name` в `project_queue`, `write_bid()` получает `owner_name` → вставляет `CLIENT NAME:` (не username)
+
+**Мотивация:** 50 бидов, 0 клиентов. Промпты писались до первого запуска и не корректировались. Главные проблемы: "ready to start" CTA звучит как будто работа уже получена; em dash и одинарные кавычки для кода — визуальные маркеры AI-текста; username вместо имени в персонализации.
+
+**Реальность:** Промпты не в репозитории (`.gitignore: prompts_*/*`). Изменения применяются локально на каждой машине.
+
+---
+
 ## 2026-03-16 | [FEAT] Shared Call 1 cache — исключить дублирование AI-анализа между аккаунтами
 
 **Проблема:** Два аккаунта (yehia + ymka) запускались как отдельные сабпроцессы с изолированными БД. Когда оба обнаруживали один проект, каждый независимо запускал Gemini Call 1 (feasibility) — двойная трата токенов на идентичный результат. Call 1 дорогой (gemini-3.1-pro-preview с HIGH thinking).
@@ -106,8 +119,8 @@
 ## 2026-03-16 | [FEAT] v2.2: client username в биде + bid_count gate перед ручным бидом
 
 **Суть:**
-1. `owner_username` пробрасывается через весь pipeline: `project_queue` (новая колонка) → `polling_loop` → `analysis_loop` → `analyze_project()` / `force_bid_analysis()` → `write_bid()` → `CLIENT USERNAME:` в промпте.
-2. `bid_writer.md` — правило CLIENT NAME: обратиться по имени один раз если имя выглядит как реальное (не handle), не форсировать.
+1. `owner_username` + `owner_display_name` пробрасываются через весь pipeline: `project_queue` (колонки) → `polling_loop` → `analysis_loop` → `analyze_project()` / `force_bid_analysis()` → `write_bid()` → `CLIENT NAME:` в промпте. Передаётся `display_name` (public_name из API), fallback на `username`.
+2. `bid_writer.md` — правило CLIENT NAME: использовать только если пост подробный (5+ предложений клиента), не форсировать.
 3. `handlers.py` — перед ручным `place_bid()` проверяется `bid_count` vs `get_max_bid_count()`. Если превышено — предупреждение в чат, бид не ставится.
 
 **Мотивация:** Персонализация увеличивает шанс ответа. Ручной бид должен иметь те же защиты что и авто-бид.

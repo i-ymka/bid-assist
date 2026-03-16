@@ -116,7 +116,7 @@
 
 **Решённые проблемы (v2.3):**
 1. ~~Один .env, один аккаунт~~ → `--env` флаг + `PROMPTS_DIR` + мульти-запуск из коробки
-2. ~~AI не знал имени клиента~~ → `owner_username` пробрасывается через весь pipeline в prompt
+2. ~~AI не знал имени клиента~~ → `owner_display_name` (public_name из API) пробрасывается через весь pipeline, `CLIENT NAME:` в промпте
 3. ~~bid_count не проверялся перед ручным бидом~~ → last-mile gate в handlers.py
 
 **Решённые проблемы (v2.4):**
