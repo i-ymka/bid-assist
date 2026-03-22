@@ -205,7 +205,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                     filtered_count += 1
                     continue
 
-                # Apply verification filter (skip crypto projects if not verified)
+                # Apply verification filter (skip verification-required projects)
                 if not repo.is_verified() and settings.verification_keywords:
                     text_to_check = f"{project.title} {project.description}".lower()
                     skill_names = " ".join([job.name.lower() for job in project.jobs])
@@ -289,7 +289,86 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
             await asyncio.sleep(30)
 
 
-async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo: SharedAnalysisRepository):
+def _recheck_queue_filters(project_data: dict, repo: ProjectRepository) -> "Optional[str]":
+    """Re-check all polling-time filters against current settings on queue exit.
+
+    Returns a skip reason string if the project should now be filtered out,
+    or None if it still passes all filters. Uses only stored queue data —
+    no API calls. A separate fresh-API bid_count check is done right before bid placement.
+    """
+    from typing import Optional
+
+    project_id = project_data["project_id"]
+
+    # Age filter — most common reason for stale projects in queue
+    time_submitted = project_data.get("time_submitted")
+    if time_submitted:
+        if isinstance(time_submitted, str):
+            try:
+                time_submitted = datetime.strptime(time_submitted, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                try:
+                    time_submitted = datetime.fromisoformat(time_submitted)
+                except ValueError:
+                    time_submitted = None
+        if time_submitted:
+            age_hours = (datetime.utcnow() - time_submitted).total_seconds() / 3600
+            if age_hours > settings.max_project_age_hours:
+                return f"Too old ({age_hours:.1f}h > {settings.max_project_age_hours}h)"
+
+    # Budget filter — user may have changed budget range
+    budget_max = project_data.get("budget_max", 0)
+    if budget_max:
+        budget_min_setting, budget_max_setting = repo.get_budget_range()
+        if not (budget_min_setting <= budget_max <= budget_max_setting):
+            return f"Budget {budget_max:.0f} outside current range {budget_min_setting}-{budget_max_setting}"
+
+    # Currency filter
+    currency = (project_data.get("currency") or "USD").upper()
+    if settings.blocked_currencies and currency in settings.blocked_currencies:
+        return f"Currency '{currency}' is blocked"
+
+    # Blacklist filter
+    if settings.blacklist_keywords:
+        text = f"{project_data.get('title', '')} {project_data.get('description', '')}".lower()
+        for kw in settings.blacklist_keywords:
+            if kw.lower() in text:
+                return f"Blacklisted keyword: '{kw}'"
+
+    # Verification filter
+    if not repo.is_verified() and settings.verification_keywords:
+        skills = project_data.get("skill_names") or ""
+        text = f"{project_data.get('title', '')} {project_data.get('description', '')} {skills}".lower()
+        for kw in settings.verification_keywords:
+            if kw in text:
+                return f"Requires verified account (keyword: '{kw}')"
+
+    # Country filter (inline — same logic as CountryFilter, no Project object needed)
+    client_country = (project_data.get("client_country") or "").lower().strip()
+    block_unknown = getattr(settings, "block_unknown_countries", False)
+    if not client_country or client_country == "unknown":
+        if block_unknown:
+            return "Country is unknown (blocked by settings)"
+    elif settings.allowed_countries:
+        if client_country not in settings.allowed_countries:
+            return f"Country '{client_country}' not in allowed list"
+    elif settings.blocked_countries and client_country in settings.blocked_countries:
+        return f"Country '{client_country}' is blocked"
+
+    # Preferred-only filter
+    if repo.skip_preferred_only() and project_data.get("is_preferred_only"):
+        return "Preferred freelancer only"
+
+    # bid_count setting change (stale data, but catches when user lowered the limit)
+    bid_count = project_data.get("bid_count", 0)
+    max_bids = repo.get_max_bid_count()
+    if bid_count > max_bids:
+        return f"Too many bids ({bid_count} > {max_bids}) — limit changed after queued"
+
+    return None
+
+
+async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo: SharedAnalysisRepository, project_service: ProjectService):
     """Background task that analyzes projects with Gemini AI."""
     logger.info("Analysis loop started")
 
@@ -309,9 +388,11 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
 
             project_id = project_data["project_id"]
 
-            # Skip preferred-only projects before spending AI tokens
-            if project_data.get("is_preferred_only"):
-                logger.info(f"SKIPPED project {project_id}: preferred freelancer only (stored in queue)")
+            # Re-check all filters against current settings before spending AI tokens.
+            # Catches: aged-out projects, budget/blacklist/country/verified/preferred changes.
+            skip_reason = _recheck_queue_filters(project_data, repo)
+            if skip_reason:
+                logger.info(f"RECHECK-FILTERED project {project_id}: {skip_reason}")
                 repo.remove_from_queue(project_id)
                 repo.add_processed_project(project_id)
                 continue
@@ -419,12 +500,17 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
             if result.verdict == "BID":
                 # Check auto-bid mode
                 if repo.is_auto_bid():
-                    # Last-mile competitor check with current DB setting
-                    # (catches cases where setting changed after project was queued)
-                    current_bid_count = project_data.get("bid_count", 0)
+                    # Last-mile competitor check: fresh bid_count from API right before placing
                     max_bids_now = repo.get_max_bid_count()
-                    if current_bid_count > max_bids_now:
-                        logger.info(f"AUTO-BID SKIPPED project {project_id}: {current_bid_count} bids > limit {max_bids_now}")
+                    fresh_project = await loop.run_in_executor(
+                        None, project_service.get_project_details, project_id
+                    )
+                    if not fresh_project:
+                        logger.info(f"AUTO-BID SKIPPED project {project_id}: project no longer available (deleted or closed)")
+                        continue
+                    fresh_bid_count = fresh_project.bid_stats.bid_count
+                    if fresh_bid_count > max_bids_now:
+                        logger.info(f"AUTO-BID SKIPPED project {project_id}: {fresh_bid_count} bids now > limit {max_bids_now}")
                         continue
 
                     # Auto-bid: place bid immediately
@@ -770,7 +856,7 @@ async def main():
     # Start background tasks
     tasks = [
         asyncio.create_task(polling_loop(repo, project_service, bidding_service)),
-        asyncio.create_task(analysis_loop(repo, notifier, shared_repo)),
+        asyncio.create_task(analysis_loop(repo, notifier, shared_repo, project_service)),
         asyncio.create_task(cleanup_loop(repo, shared_repo)),
     ]
 

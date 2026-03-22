@@ -1,5 +1,6 @@
 """Telegram command and callback handlers."""
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 import html
@@ -18,7 +19,7 @@ from src.config import settings
 from src.services.storage import ProjectRepository
 from src.services.freelancer import FreelancerClient, BiddingService, ProjectService
 from src.services.freelancer.bidding import strip_markdown
-from src.services.telegram.notifier import create_updated_keyboard, rebuild_bid_message, ce, random_header_emoji
+from src.services.telegram.notifier import create_updated_keyboard, rebuild_bid_message, ce, random_header_emoji, escape_markdown_v2
 from src.models import Bid
 
 logger = logging.getLogger(__name__)
@@ -42,8 +43,9 @@ try:
 except Exception:
     pass  # DB not ready yet — will use defaults
 
-# Singleton bidding service
+# Singleton services
 _bidding_service = None
+_project_service = None
 
 
 def get_bidding_service() -> BiddingService:
@@ -53,6 +55,15 @@ def get_bidding_service() -> BiddingService:
         client = FreelancerClient()
         _bidding_service = BiddingService(client)
     return _bidding_service
+
+
+def get_project_service() -> ProjectService:
+    """Get or create project service."""
+    global _project_service
+    if _project_service is None:
+        client = FreelancerClient()
+        _project_service = ProjectService(client)
+    return _project_service
 
 
 def get_runtime_state() -> dict:
@@ -1219,7 +1230,7 @@ def _build_settings_message(repo: ProjectRepository) -> str:
     poll_min = poll_sec // 60
 
     # Clear Yes/No labels
-    crypto_status = "✅ Yes" if repo.is_verified() else "❌ No"
+    verified_status = "✅ Yes" if repo.is_verified() else "❌ No"
     preferred_status = "✅ Yes" if not repo.skip_preferred_only() else "❌ No"
     auto_bid_status = "✅ Yes" if repo.is_auto_bid() else "❌ No"
     skipped_status = "✅ Yes" if repo.get_receive_skipped() else "❌ No"
@@ -1235,7 +1246,7 @@ def _build_settings_message(repo: ProjectRepository) -> str:
         f"• Languages: {', '.join(settings.allowed_languages) if settings.allowed_languages else 'all'}\n"
         f"• Blocked currencies: {', '.join(settings.blocked_currencies) if settings.blocked_currencies else 'none'}\n\n"
         f"<b>Show projects:</b>\n"
-        f"• Crypto (verified account): {crypto_status}\n"
+        f"• Verified account: {verified_status}\n"
         f"• Preferred-only: {preferred_status}\n\n"
         f"<b>Bidding:</b>\n"
         f"• Auto-bid: {auto_bid_status}\n"
@@ -1250,7 +1261,7 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
     """Create the keyboard for the settings message."""
     state = get_runtime_state()
 
-    crypto_yn = "✅ Yes" if repo.is_verified() else "❌ No"
+    verified_yn = "✅ Yes" if repo.is_verified() else "❌ No"
     preferred_yn = "✅ Yes" if not repo.skip_preferred_only() else "❌ No"
     auto_bid_yn = "✅ Yes" if repo.is_auto_bid() else "❌ No"
     skipped_yn = "✅ Yes" if repo.get_receive_skipped() else "❌ No"
@@ -1264,7 +1275,7 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"⏱ Poll: {repo.get_poll_interval()}s", callback_data="settings:poll"),
         ],
         [
-            InlineKeyboardButton(f"Crypto: {crypto_yn}", callback_data="settings:verified"),
+            InlineKeyboardButton(f"Verified: {verified_yn}", callback_data="settings:verified"),
             InlineKeyboardButton(f"Preferred: {preferred_yn}", callback_data="settings:skip_preferred"),
         ],
         [
@@ -1276,7 +1287,7 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(f"Max bids: {repo.get_max_bid_count()} competitors", callback_data="settings:max_bids"),
-            InlineKeyboardButton(f"Skipped: {skipped_yn}", callback_data="settings:skip_notif"),
+            InlineKeyboardButton(f"Show skipped: {skipped_yn}", callback_data="settings:skip_notif"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -1423,10 +1434,10 @@ async def cmd_setverified(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔒 <b>Account Verification Status</b>\n\n"
             f"Status: {status}\n"
             f"Filtered keywords: {keywords}\n\n"
-            f"If not verified, projects with crypto/blockchain keywords are filtered out.\n\n"
+            f"If not verified, projects with verification-required keywords are filtered out.\n\n"
             f"<b>Usage:</b>\n"
             f"<code>/setverified on</code> - I have verified account\n"
-            f"<code>/setverified off</code> - Filter crypto projects",
+            f"<code>/setverified off</code> - Filter verification-required projects",
             parse_mode="HTML"
         )
         return
@@ -1437,7 +1448,7 @@ async def cmd_setverified(update: Update, context: ContextTypes.DEFAULT_TYPE):
         repo.set_verified(True)
         await update.message.reply_text(
             "✅ Verified account: <b>ON</b>\n\n"
-            "Crypto/blockchain projects will now be shown.",
+            "Verification-required projects will now be shown.",
             parse_mode="HTML"
         )
         logger.info("Verified account set to ON via Telegram")
@@ -1445,7 +1456,7 @@ async def cmd_setverified(update: Update, context: ContextTypes.DEFAULT_TYPE):
         repo.set_verified(False)
         await update.message.reply_text(
             "❌ Verified account: <b>OFF</b>\n\n"
-            "Crypto/blockchain projects will be filtered out.",
+            "Verification-required projects will be filtered out.",
             parse_mode="HTML"
         )
         logger.info("Verified account set to OFF via Telegram")
@@ -1714,7 +1725,6 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
     original_text = query.message.text_markdown_v2 if query.message.text_markdown_v2 else query.message.text
 
     # Edit skip message to show we're generating bid
-    from src.services.telegram.notifier import escape_markdown_v2
     await query.edit_message_text(
         original_text + "\n\n⏳ _Generating bid\\.\\.\\._",
         parse_mode="MarkdownV2",
@@ -1899,7 +1909,6 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         url = bid_data.get("url", "")
         check_bid_url = f"{url}/proposals" if url else ""
 
-        from src.services.telegram.notifier import escape_markdown_v2
         status_text = "\n\n✅ *Bid already placed by teammate\\!*"
 
         keyboard = None
@@ -1917,21 +1926,67 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.warning(f"Could not update keyboard: {e}")
         return
 
-    # Last-mile competitor check before manual bid placement
-    bid_count_now = bid_data.get("bid_count", 0)
+    # Last-mile competitor check: fresh bid_count from API right before placing
     max_bids_now = repo.get_max_bid_count()
-    if bid_count_now > max_bids_now:
-        await query.answer("")
-        await query.message.reply_text(
-            f"⚠️ Too many competitors: this project had {bid_count_now} bids when analyzed "
-            f"(your limit: {max_bids_now}). Bid not placed."
+    loop = asyncio.get_event_loop()
+    fresh_project = await loop.run_in_executor(
+        None, get_project_service().get_project_details, project_id
+    )
+    if not fresh_project:
+        await query.answer("⚠️ Project unavailable", show_alert=True)
+        warning_text = rebuild_bid_message(bid_data) + escape_markdown_v2(
+            "\n\n⚠️ Could not verify project status — it may have been deleted or closed."
         )
+        try:
+            await query.edit_message_text(
+                text=warning_text,
+                parse_mode="MarkdownV2",
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+        return
+    fresh_bid_count = fresh_project.bid_stats.bid_count
+    if fresh_bid_count > max_bids_now:
+        await query.answer("⚠️ Too many competitors", show_alert=True)
+        force_btn = InlineKeyboardButton(
+            f"⚠️ Bid anyway ({fresh_bid_count} competitors)",
+            callback_data=f"bid_force:{project_id}",
+        )
+        edit_amount_btn = InlineKeyboardButton(
+            "✏️ Edit Amount",
+            callback_data=f"edit_amount:{project_id}",
+            api_kwargs={"style": "primary"},
+        )
+        edit_text_btn = InlineKeyboardButton(
+            "✏️ Edit Proposal",
+            callback_data=f"edit_text:{project_id}",
+            api_kwargs={"style": "primary"},
+        )
+        warning_text = rebuild_bid_message(bid_data) + escape_markdown_v2(
+            f"\n\n⚠️ Project now has {fresh_bid_count} bids (your limit: {max_bids_now})."
+        )
+        try:
+            await query.edit_message_text(
+                text=warning_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [edit_amount_btn, edit_text_btn],
+                    [force_btn],
+                ]),
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to edit message with competitor warning: {e}")
         return
 
     # Show loading indicator via callback answer (doesn't modify message)
     await query.answer("⏳ Placing bid...")
+    await _execute_bid_placement(query, project_id, bid_data, repo, context)
 
-    # Place the bid
+
+async def _execute_bid_placement(query, project_id: int, bid_data: dict, repo: ProjectRepository, context):
+    """Place a bid and update the message with the result."""
     bidding_service = get_bidding_service()
 
     bid = Bid(
@@ -1944,12 +1999,10 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     result = bidding_service.place_bid(bid)
 
-    # Get data before removing from pending
     currency = bid_data.get("currency", "USD")
     url = bid_data.get("url", "")
     bid_count = bid_data.get("bid_count", 0)
 
-    # Update existing pending_manual record or create new one
     repo.update_bid_record_on_place(
         project_id=project_id,
         amount=bid_data["amount"],
@@ -1960,12 +2013,9 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         notification_sent=True,
     )
 
-    # Remove from pending
     repo.remove_pending_bid(project_id)
 
-    # Update message with result
     if result.success:
-        # Get rank info and remaining bids immediately after placing bid
         rank_info = None
         remaining_bids = None
         if result.bid_id:
@@ -1978,7 +2028,6 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             except Exception:
                 pass
 
-        # Build "Check my bid" URL
         check_bid_url = f"{url}/proposals" if url else ""
         keyboard = None
         if check_bid_url:
@@ -1986,11 +2035,9 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 [InlineKeyboardButton("🔗 Check my bid", url=check_bid_url, api_kwargs={"style": "primary"})]
             ])
 
-        # Build variant 2 message from scratch
         from src.services.telegram.notifier import build_bid_placed_message
         try:
             placed_text = build_bid_placed_message(bid_data, rank_info, remaining_bids)
-
             await query.edit_message_text(
                 text=placed_text,
                 parse_mode="MarkdownV2",
@@ -2015,12 +2062,10 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.error(f"Fallback also failed: {e2}")
                 try:
                     await query.edit_message_reply_markup(reply_markup=keyboard)
-                except:
+                except Exception:
                     pass
 
-        # Schedule delayed update (1 min) with fresh bid count, avg, position
         if result.bid_id:
-            import asyncio
             from src.services.telegram.notifier import schedule_bid_update
             try:
                 edited_text = placed_text
@@ -2042,31 +2087,26 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         logger.info(f"Bid placed on project {project_id}: {bid_data['amount']} {currency}")
     else:
-        # On failure, show error as alert
-        from src.services.telegram.notifier import escape_markdown_v2
-
-        # Keep edit buttons so user can try again
         edit_amount_btn = InlineKeyboardButton(
             "✏️ Edit Amount",
             callback_data=f"edit_amount:{project_id}",
             api_kwargs={"style": "primary"},
-            )
+        )
         edit_text_btn = InlineKeyboardButton(
             "✏️ Edit Proposal",
             callback_data=f"edit_text:{project_id}",
             api_kwargs={"style": "primary"},
-            )
+        )
         retry_btn = InlineKeyboardButton(
-            f"🔄 Retry Bid",
+            "🔄 Retry Bid",
             callback_data=f"bid:{project_id}",
             api_kwargs={"style": "danger"},
-            )
+        )
         keyboard = InlineKeyboardMarkup([
             [edit_amount_btn, edit_text_btn],
             [retry_btn]
         ])
 
-        # Re-add to pending bids for retry (preserve all context)
         repo.add_pending_bid(
             project_id=project_id,
             amount=bid_data["amount"],
@@ -2083,7 +2123,6 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             avg_bid=bid_data.get("avg_bid"),
         )
 
-        # Check for common errors and provide helpful messages
         error_msg = result.message
         help_text = "You can edit and retry\\."
 
@@ -2099,7 +2138,6 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "Then retry the bid\\."
             )
 
-        # Reply with error
         try:
             await query.message.reply_text(
                 f"❌ *Bid failed*\n\n"
@@ -2112,6 +2150,30 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error(f"Failed to send error message: {e}")
 
         logger.error(f"Bid failed on project {project_id}: {result.message}")
+
+
+async def handle_bid_force_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Bid anyway' button — place bid bypassing competitor limit."""
+    query = update.callback_query
+
+    try:
+        project_id = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        await query.answer("❌ Invalid data", show_alert=True)
+        return
+
+    repo = ProjectRepository()
+    bid_data = repo.get_pending_bid(project_id)
+    if not bid_data:
+        await query.answer("❌ Bid data expired", show_alert=True)
+        return
+
+    if repo.is_project_bidded(project_id):
+        await query.answer("Bid already placed by teammate!", show_alert=True)
+        return
+
+    await query.answer("⏳ Placing bid...")
+    await _execute_bid_placement(query, project_id, bid_data, repo, context)
 
 
 async def handle_emoji_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2208,6 +2270,7 @@ def setup_handlers(application: Application):
 
     # Callback handler for Bid button
     application.add_handler(CallbackQueryHandler(handle_bid_callback, pattern="^bid:"))
+    application.add_handler(CallbackQueryHandler(handle_bid_force_callback, pattern="^bid_force:"))
 
     # Custom emoji ID extractor (must be last — catches all text messages with entities)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_emoji_extract))

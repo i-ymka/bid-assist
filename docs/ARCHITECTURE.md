@@ -121,7 +121,18 @@ bid-assist/
 - Запускает Telegram bot polling + 3 фоновых asyncio-таска
 - Graceful shutdown по SIGINT/SIGTERM
 - Логирование в файл `logs/bot_debug.log` + stdout
-- Фильтрация проектов inline (budget, currency, language, age, preferred-only, verification, country, blacklist)
+
+**`polling_loop`** — фильтрация inline перед добавлением в очередь:
+`budget → currency → language → bid_count → age → preferred-only → blacklist → verification → country → add_to_queue`
+
+**`_recheck_queue_filters(project_data, repo)`** — двойная проверка при выходе из очереди, до AI:
+Повторяет все фильтры используя только данные из БД (без API-вызовов): возраст, бюджет, валюта, blacklist, verification keywords, страна, preferred-only, bid_count. Если не прошёл — удаляется из очереди, AI не вызывается.
+
+**`analysis_loop`** — принимает `project_service` для fresh API-вызовов:
+1. `_recheck_queue_filters()` — все фильтры повторно
+2. Shared AI cache (try_claim / get_result)
+3. Gemini Call 1 + pricing + Call 2
+4. Авто-бид: fresh `project_service.get_project_details()` для bid_count прямо перед `place_bid()`
 
 ### `src/config/settings.py` — Конфигурация
 - `Settings(BaseSettings)` — загружает файл из `os.environ["ENV_FILE"]` (default: `.env`) через pydantic-settings
@@ -203,6 +214,9 @@ bid-assist/
 - `send_skip_notification_to_user()` — SKIP уведомление
 - `send_auto_bid_notification()` — авто-бид результат с рангом
 - `schedule_bid_update()` — отложенное обновление статистики бидов в сообщении
+
+**Правило: одно сообщение на проект.**
+На каждый проект существует ровно одно Telegram-сообщение. Все изменения состояния (редактирование суммы/текста, предупреждения, результат размещения) — только через `edit_message_text` / `edit_message_reply_markup` существующего сообщения. Отправлять новое сообщение (`reply_text`, `send_message`) запрещено. Сообщение всегда содержит актуальную информацию о проекте.
 
 ### `src/services/currency.py` — Валюты
 - `to_usd()` / `from_usd()` — конвертация через open.er-api.com

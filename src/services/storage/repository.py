@@ -1322,7 +1322,7 @@ class ProjectRepository:
             return False
 
     def is_verified(self) -> bool:
-        """Check if account is verified (can bid on crypto projects)."""
+        """Check if account is verified (can bid on verification-required projects)."""
         try:
             cursor = self._conn.cursor()
             cursor.execute(
@@ -1331,7 +1331,7 @@ class ProjectRepository:
             row = cursor.fetchone()
             if row:
                 return row[0] == "true"
-            # Default: not verified (filter crypto projects)
+            # Default: not verified (filter verification-required projects)
             return False
         except sqlite3.Error as e:
             logger.error(f"Failed to check verified state: {e}")
