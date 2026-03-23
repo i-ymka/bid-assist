@@ -24,11 +24,39 @@ _ROOT = Path(__file__).parent.parent.parent.parent
 ANALYSIS_RULES_PATH = _ROOT / settings.prompts_dir / "analyze.md"
 BID_WRITER_RULES_PATH = _ROOT / settings.prompts_dir / "bid_writer.md"
 
-# Fallback chains (primary model comes from settings)
-ANALYSIS_FALLBACK_MODELS = ["gemini-2.5-pro"]
-BID_FALLBACK_MODELS = ["gemini-2.5-pro"]
+# Per-(home_dir, model) cooldown tracking. Key: (home_dir, model), Value: unix timestamp until ready.
+# home_dir="" means default ~/.gemini (pro account).
+_cooldowns: dict[tuple[str, str], float] = {}
 
-_cooldowns: dict[str, float] = {}  # model -> timestamp when it can be retried
+# Set to True when all accounts/models are exhausted. Consumed once by analysis_loop to send notification.
+_all_exhausted_flag: bool = False
+
+# Account pool — populated lazily on first call
+_pool_initialized: bool = False
+_primary_home: str = ""        # expanded path or "" for default
+_pool_homes: list[str] = []    # expanded paths for free accounts
+
+
+def _init_pool() -> None:
+    """Lazily initialize account pool from settings."""
+    global _pool_initialized, _primary_home, _pool_homes
+    if _pool_initialized:
+        return
+    from pathlib import Path
+    _primary_home = str(Path(settings.gemini_home_primary).expanduser()) if settings.gemini_home_primary else ""
+    _pool_homes = [str(Path(p).expanduser()) for p in settings.gemini_home_pool]
+    _pool_initialized = True
+    names = [(_primary_home or "~/.gemini (default)") + " [pro]"] + [f"{h} [free]" for h in _pool_homes]
+    logger.info(f"Gemini account pool loaded: {len(names)} account(s): {names}")
+
+
+def consume_exhaustion_flag() -> bool:
+    """Return True (and clear flag) if all accounts just became exhausted. Call from analysis_loop."""
+    global _all_exhausted_flag
+    if _all_exhausted_flag:
+        _all_exhausted_flag = False
+        return True
+    return False
 
 
 @dataclass
@@ -74,44 +102,65 @@ def _extract_clean_error(stderr: str) -> str:
 
 def _run_gemini_cli(
     prompt: str,
-    model: str,
-    fallback_models: list[str],
+    primary_model: str,
+    pool_model: str,
     timeout: int = 600,
 ) -> Optional[str]:
-    """Run Gemini CLI with automatic model fallback chain on 429 errors.
+    """Run Gemini CLI with automatic account pool rotation on quota exhaustion.
+
+    Tries primary account first (pro models), then rotates through free pool accounts.
+    On 429, marks (account, model) in cooldown and tries next.
+    When all accounts exhausted, sets _all_exhausted_flag for analysis_loop to notify user.
 
     Args:
         prompt: Full prompt text
-        model: Primary model to use
-        fallback_models: Ordered list of fallback models if primary fails
+        primary_model: Model to use with the primary (pro) account
+        pool_model: Model to use with free pool accounts
         timeout: Subprocess timeout in seconds
 
     Returns:
         CLI stdout text, or None if all attempts failed.
     """
-    now = time.time()
-    all_models = [model] + [m for m in fallback_models if m != model]
-    models_to_try = []
-    for m in all_models:
-        cooldown_until = _cooldowns.get(m, 0)
-        if now < cooldown_until:
-            remaining = int(cooldown_until - now)
-            logger.info(f"Model {m} on cooldown ({remaining}s left), skipping")
-        else:
-            models_to_try.append(m)
+    global _all_exhausted_flag
+    _init_pool()
 
-    if not models_to_try:
-        logger.error("All models are on cooldown, cannot run")
+    # Build ordered (home_dir, model) pairs: primary first, then pool
+    pairs = [(_primary_home, primary_model)] + [
+        (home, pool_model) for home in _pool_homes
+    ]
+
+    now = time.time()
+    available = []
+    for home, model in pairs:
+        key = (home, model)
+        until = _cooldowns.get(key, 0)
+        if now < until:
+            remaining = int(until - now)
+            label = home or "~/.gemini"
+            logger.info(f"Account {label} / {model}: cooldown {remaining}s left, skipping")
+        else:
+            available.append((home, model))
+
+    if not available:
+        logger.error("All Gemini accounts/models are on cooldown")
+        _all_exhausted_flag = True
         return None
 
-    for current_model in models_to_try:
+    for home, model in available:
+        env = None
+        if home:
+            import os as _os
+            env = {**_os.environ, "HOME": home}
+
         try:
-            logger.info(f"Running Gemini CLI: {current_model}")
+            label = home or "~/.gemini"
+            logger.info(f"Running Gemini CLI: {model} (account: {label})")
             result = subprocess.run(
-                ["gemini", "-m", current_model, "--yolo", "-p", prompt],
+                ["gemini", "-m", model, "--yolo", "-p", prompt],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=env,
             )
 
             if result.returncode < 0:
@@ -123,17 +172,17 @@ def _run_gemini_cli(
                 clean_msg = _extract_clean_error(result.stderr)
 
                 if error_type == "capacity":
-                    logger.warning(f"Model {current_model}: 429 — {clean_msg}")
-                    _cooldowns[current_model] = time.time() + 300
+                    logger.warning(f"{label} / {model}: 429 — {clean_msg}")
+                    _cooldowns[(home, model)] = time.time() + 3600  # 1h cooldown
                     continue
                 elif error_type == "cancelled":
                     logger.info("Gemini CLI interrupted (Ctrl+C)")
                     return None
                 else:
-                    logger.error(f"Gemini CLI failed ({current_model}): {clean_msg}")
+                    logger.error(f"Gemini CLI failed ({label} / {model}): {clean_msg}")
                     return None
 
-            _cooldowns.pop(current_model, None)
+            _cooldowns.pop((home, model), None)
 
             response = result.stdout.strip()
             for boilerplate in [
@@ -144,9 +193,11 @@ def _run_gemini_cli(
             return response.strip()
 
         except subprocess.TimeoutExpired:
-            logger.error(f"Gemini CLI timed out ({current_model}, {timeout}s)")
+            logger.error(f"Gemini CLI timed out ({label} / {model}, {timeout}s)")
             continue
 
+    logger.error("All Gemini accounts failed")
+    _all_exhausted_flag = True
     return None
 
 
@@ -184,7 +235,7 @@ Then output ===RESULT=== and the structured result.
 """
 
     logger.info(f"[Call 1] Analyzing feasibility: {title[:50]}...")
-    response = _run_gemini_cli(prompt, settings.gemini_model, ANALYSIS_FALLBACK_MODELS, timeout=1200)
+    response = _run_gemini_cli(prompt, settings.gemini_model, settings.gemini_pool_model, timeout=1200)
     if not response:
         return None
 
@@ -257,6 +308,15 @@ def _calculate_amount(
         )
         return None  # signal to caller: skip this project
 
+    # Never bid below client's minimum budget (Freelancer rejects such bids)
+    if budget_min_usd and budget_min_usd > 0:
+        effective_min = round(budget_min_usd / 10) * 10
+        if target < effective_min:
+            logger.info(
+                f"Pricing: target ${target:.0f} raised to budget_min ${effective_min:.0f}"
+            )
+            target = effective_min
+
     return round(target / 10) * 10
 
 
@@ -309,7 +369,7 @@ Output ONLY the BID: and FAIR_PRICE: lines. No other text.
     max_attempts = 2
     for attempt in range(1, max_attempts + 1):
         logger.info(f"[Call 2] Writing bid for project {project_id} (attempt {attempt}/{max_attempts})...")
-        response = _run_gemini_cli(prompt, settings.bid_model, BID_FALLBACK_MODELS)
+        response = _run_gemini_cli(prompt, settings.bid_model, settings.bid_pool_model)
         if not response:
             return None, None
 
@@ -604,4 +664,4 @@ def analyse_weekly_bids(
 Format: plain text, numbered suggestions, no markdown headers.
 """
 
-    return _run_gemini_cli(prompt, settings.gemini_model, ANALYSIS_FALLBACK_MODELS, timeout=300)
+    return _run_gemini_cli(prompt, settings.gemini_model, settings.gemini_pool_model, timeout=300)

@@ -73,7 +73,7 @@ from src.services.freelancer import FreelancerClient, ProjectService, BiddingSer
 from src.services.storage import ProjectRepository
 from src.services.telegram.handlers import setup_handlers
 from src.services.telegram.notifier import Notifier
-from src.services.ai.gemini_analyzer import analyze_project, analyze_feasibility
+from src.services.ai.gemini_analyzer import analyze_project, analyze_feasibility, consume_exhaustion_flag
 from src.services.storage.shared_repository import SharedAnalysisRepository
 from src.models import AIAnalysis
 from src.models.bid import Bid, Verdict
@@ -483,6 +483,11 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
             if not result:
                 logger.error(f"Analysis failed for {project_id}")
                 repo.remove_from_queue(project_id)
+                # Check if all Gemini accounts hit quota — notify user once and pause 30 min
+                if consume_exhaustion_flag():
+                    logger.warning("All Gemini accounts exhausted — sending notification, pausing 30 min")
+                    await notifier.send_quota_exhausted_notification()
+                    await asyncio.sleep(1800)
                 # Don't add to processed — next poll cycle will retry if project still passes filters
                 continue
 

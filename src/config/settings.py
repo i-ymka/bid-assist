@@ -18,9 +18,20 @@ class Settings(BaseSettings):
     # Telegram Settings
     telegram_chat_ids_raw: str = Field("", alias="TELEGRAM_CHAT_IDS")
 
-    # Gemini CLI models (fallback chains handled in gemini_analyzer.py)
-    gemini_model: str = Field("gemini-3.1-pro-preview", alias="GEMINI_MODEL")   # Call 1: feasibility analysis
-    bid_model: str = Field("gemini-2.5-flash", alias="BID_MODEL")               # Call 2: bid writing
+    # Gemini CLI models
+    gemini_model: str = Field("gemini-3.1-pro-preview", alias="GEMINI_MODEL")      # Call 1: primary (pro account)
+    bid_model: str = Field("gemini-3.1-flash-lite-preview", alias="BID_MODEL")     # Call 2: primary (pro account)
+    gemini_pool_model: str = Field("gemini-3-pro-preview", alias="GEMINI_POOL_MODEL")    # Call 1: pool (free accounts)
+    bid_pool_model: str = Field("gemini-3-flash-preview", alias="BID_POOL_MODEL")       # Call 2: pool (free accounts)
+
+    # Gemini account pool (multi-account quota rotation)
+    gemini_home_primary: str = Field("", alias="GEMINI_HOME_PRIMARY")   # path for pro account home dir (empty = default ~/.gemini)
+    gemini_home_pool_raw: str = Field("", alias="GEMINI_HOME_POOL")     # comma-separated paths for free account home dirs
+
+    @property
+    def gemini_home_pool(self) -> List[str]:
+        """Parse comma-separated pool account home directories."""
+        return [p.strip() for p in self.gemini_home_pool_raw.split(",") if p.strip()]
 
     # Filtering Settings
     blacklist_raw: str = Field("", alias="BL")
