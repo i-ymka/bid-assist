@@ -19,6 +19,20 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
+_MODEL_SHORT: dict[str, str] = {
+    "gemini-3.1-pro-preview":        "pro-3.1",
+    "gemini-3-pro-preview":          "pro-3",
+    "gemini-3.1-flash-lite-preview": "flash-3.1",
+    "gemini-2.5-pro":                "pro-2.5",
+    "gemini-2.5-flash":              "flash-2.5",
+    "gemini-2.5-flash-lite":         "flash-lite-2.5",
+    "gemini-2.5-flash-lite-preview": "flash-lite-2.5",
+}
+
+def _short_model(model: str) -> str:
+    return _MODEL_SHORT.get(model, model)
+
+
 # Prompt paths (configurable per-account via PROMPTS_DIR in .env)
 _ROOT = Path(__file__).parent.parent.parent.parent
 ANALYSIS_RULES_PATH = _ROOT / settings.prompts_dir / "analyze.md"
@@ -46,8 +60,7 @@ def _init_pool() -> None:
     _primary_home = str(Path(settings.gemini_home_primary).expanduser()) if settings.gemini_home_primary else ""
     _pool_homes = [str(Path(p).expanduser()) for p in settings.gemini_home_pool]
     _pool_initialized = True
-    names = [(_primary_home or "~/.gemini (default)") + " [pro]"] + [f"{h} [free]" for h in _pool_homes]
-    logger.info(f"Gemini account pool loaded: {len(names)} account(s): {names}")
+    logger.info(f"Gemini pool: 1 pro + {len(_pool_homes)} free accounts")
 
 
 def consume_exhaustion_flag() -> bool:
@@ -80,8 +93,14 @@ def _load_prompt(path: Path) -> str:
 
 def _classify_cli_error(stderr: str) -> str:
     lower = stderr.lower()
-    if "429" in lower or "capacity" in lower or "rate limit" in lower or "resource_exhausted" in lower:
-        return "capacity"
+    # Server capacity issue — no cooldown, just try next account
+    if "no capacity available" in lower or "capacity available for model" in lower:
+        return "overload"
+    # Real quota exhaustion — long cooldown
+    if "resource_exhausted" in lower or "quota" in lower:
+        return "quota"
+    if "429" in lower or "rate limit" in lower:
+        return "overload"
     if "operation cancelled" in lower or "sigint" in lower or "sigterm" in lower:
         return "cancelled"
     return "unknown"
@@ -136,8 +155,8 @@ def _run_gemini_cli(
         until = _cooldowns.get(key, 0)
         if now < until:
             remaining = int(until - now)
-            label = home or "~/.gemini"
-            logger.info(f"Account {label} / {model}: cooldown {remaining}s left, skipping")
+            label = Path(home).name if home else "default"
+            logger.debug(f"{label}/{model}: cooldown {remaining}s left, skipping")
         else:
             available.append((home, model))
 
@@ -153,8 +172,8 @@ def _run_gemini_cli(
             env = {**_os.environ, "HOME": home}
 
         try:
-            label = home or "~/.gemini"
-            logger.info(f"Running Gemini CLI: {model} (account: {label})")
+            label = Path(home).name if home else "default"
+            logger.debug(f"[Call] {label}/{_short_model(model)}")
             result = subprocess.run(
                 ["gemini", "-m", model, "--yolo", "-p", prompt],
                 capture_output=True,
@@ -164,23 +183,26 @@ def _run_gemini_cli(
             )
 
             if result.returncode < 0:
-                logger.info(f"Gemini CLI killed by signal {-result.returncode}")
+                logger.debug(f"Gemini CLI killed by signal {-result.returncode}")
                 return None
 
             if result.returncode != 0:
                 error_type = _classify_cli_error(result.stderr)
                 clean_msg = _extract_clean_error(result.stderr)
 
-                if error_type == "capacity":
-                    logger.warning(f"{label} / {model}: 429 — {clean_msg}")
+                if error_type == "quota":
+                    logger.warning(f"{label}/{_short_model(model)}: [bold red]quota exhausted[/bold red]")
                     _cooldowns[(home, model)] = time.time() + 3600  # 1h cooldown
                     continue
+                elif error_type == "overload":
+                    logger.warning(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — trying next")
+                    continue
                 elif error_type == "cancelled":
-                    logger.info("Gemini CLI interrupted (Ctrl+C)")
+                    logger.debug("Gemini CLI interrupted")
                     return None
                 else:
-                    logger.error(f"Gemini CLI failed ({label} / {model}): {clean_msg}")
-                    return None
+                    logger.warning(f"{label}/{_short_model(model)}: [bold yellow]{clean_msg}[/bold yellow] — trying next")
+                    continue
 
             _cooldowns.pop((home, model), None)
 
@@ -234,7 +256,7 @@ Write your THOUGHTS first (Risk check, Tech check, Red Zone check, Day estimate)
 Then output ===RESULT=== and the structured result.
 """
 
-    logger.info(f"[Call 1] Analyzing feasibility: {title[:50]}...")
+    logger.debug(f"[Call 1] Analyzing: {title[:50]}...")
     response = _run_gemini_cli(prompt, settings.gemini_model, settings.gemini_pool_model, timeout=1200)
     if not response:
         return None
@@ -266,7 +288,10 @@ Then output ===RESULT=== and the structured result.
     days = int(days_match.group(1)) if days_match else 1
     summary = summary_match.group(1).strip() if summary_match else ""
 
-    logger.info(f"[Call 1] Project {project_id}: VERDICT={verdict}, DAYS={days}")
+    if verdict == "PASS":
+        logger.info(f"[bold green]PASS[/bold green]  {title[:60]}  ({days}d)")
+    else:
+        logger.info(f"[bold red]SKIP[/bold red]  {title[:60]}")
     return {"verdict": verdict, "days": days, "summary": summary}
 
 
@@ -303,8 +328,7 @@ def _calculate_amount(
 
     if target < floor:
         logger.info(
-            f"Pricing: target ${target:.0f} < floor ${floor:.0f} "
-            f"({days}d × ${min_daily_rate}/d) — project underpriced for us"
+            f"[bold yellow]NOPE[/bold yellow]  ${target:.0f} < floor ${floor:.0f}  ({days}d × ${min_daily_rate}/d)"
         )
         return None  # signal to caller: skip this project
 
@@ -317,7 +341,9 @@ def _calculate_amount(
             )
             target = effective_min
 
-    return round(target / 10) * 10
+    final = round(target / 10) * 10
+    logger.info(f"[bold green]YEP[/bold green]   ${final:.0f}  ({days}d) — writing bid")
+    return final
 
 
 def write_bid(
@@ -368,7 +394,7 @@ Output ONLY the BID: and FAIR_PRICE: lines. No other text.
 
     max_attempts = 2
     for attempt in range(1, max_attempts + 1):
-        logger.info(f"[Call 2] Writing bid for project {project_id} (attempt {attempt}/{max_attempts})...")
+        logger.debug(f"[Call 2] Writing bid for project {project_id} (attempt {attempt}/{max_attempts})...")
         response = _run_gemini_cli(prompt, settings.bid_model, settings.bid_pool_model)
         if not response:
             return None, None

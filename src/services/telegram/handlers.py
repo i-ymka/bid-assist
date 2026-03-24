@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import warnings
+warnings.filterwarnings("ignore", message=".*per_message.*", category=UserWarning)
 from datetime import datetime, timedelta
 import html
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -26,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 # Conversation states
-WAITING_AMOUNT, WAITING_TEXT = range(2)
+WAITING_AMOUNT, WAITING_TEXT, WAITING_SPINNER = range(3)
 
 # Runtime state (shared across handlers)
 # Budget is persisted in runtime_settings DB; load stored values at import time.
@@ -1200,27 +1202,69 @@ async def handle_bidstats_callback(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text(f"❌ Error fetching bid stats: {e}")
 
 
-# Budget presets: (min, max)
-_BUDGET_PRESETS = [
-    (30, 500),
-    (50, 1000),
-    (100, 1000),
-    (50, 2000),
-    (50, 3000),
-    (100, 5000),
-]
+# Spinner config: key → (label, unit, min, max, step_small, step_big)
+_SPINNER_CONFIG = {
+    "bid_adj":    ("Bid Adjustment",  "%",      -50, 50,    5,  10),
+    "max_bids":   ("Max Competitors", " bids",    1, 999,   5,  25),
+    "daily_rate": ("Min Daily Rate",  "$/day",   25, 500,  25,  50),
+    "poll":       ("Poll Interval",   "s",       30, 3600, 30,  60),
+    "budget_min": ("Min Budget",      "$",       30, 10000, 50, 200),
+    "budget_max": ("Max Budget",      "$",       30, 10000, 50, 200),
+}
 
-# Poll interval presets (seconds)
-_POLL_PRESETS = [60, 120, 180, 300, 600]
 
-# Min daily rate presets (USD/day)
-_DAILY_RATE_PRESETS = [50, 75, 100, 125, 150, 200]
+def _spinner_get(repo: "ProjectRepository", key: str) -> int:
+    state = get_runtime_state()
+    if key == "bid_adj":    return repo.get_bid_adjustment()
+    if key == "max_bids":   return repo.get_max_bid_count()
+    if key == "daily_rate": return repo.get_min_daily_rate()
+    if key == "poll":       return repo.get_poll_interval()
+    if key == "budget_min": return state["min_budget"]
+    if key == "budget_max": return state["max_budget"]
+    return 0
 
-# Max competitor bid count presets (999 = effectively unlimited)
-_MAX_BID_COUNT_PRESETS = [25, 50, 75, 100, 150, 999]
 
-# Bid adjustment presets (% relative to market avg, negative = underbid)
-_BID_ADJUSTMENT_PRESETS = [-50, -25, -10, 0, 10, 25]
+def _spinner_set(repo: "ProjectRepository", key: str, value: int) -> None:
+    state = get_runtime_state()
+    if key == "bid_adj":    repo.set_bid_adjustment(value)
+    elif key == "max_bids":   repo.set_max_bid_count(value)
+    elif key == "daily_rate": repo.set_min_daily_rate(value)
+    elif key == "poll":       repo.set_poll_interval(value)
+    elif key == "budget_min":
+        state["min_budget"] = value
+        repo.set_budget_range(value, state["max_budget"])
+    elif key == "budget_max":
+        state["max_budget"] = value
+        repo.set_budget_range(state["min_budget"], value)
+
+
+def _build_spinner_message(key: str, value: int) -> str:
+    label, unit, min_val, max_val, _, _ = _SPINNER_CONFIG[key]
+    sign = "+" if value > 0 else ""
+    return (
+        f"⚙️ <b>{label}</b>\n\n"
+        f"Value: <b>{sign}{value}{unit}</b>\n\n"
+        f"Range: {min_val}…{max_val}{unit}"
+    )
+
+
+def _build_spinner_keyboard(key: str, value: int) -> InlineKeyboardMarkup:
+    _, unit, min_val, max_val, step_s, step_b = _SPINNER_CONFIG[key]
+    sign = "+" if value > 0 else ""
+    display = f"{sign}{value}{unit}"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"−{step_b}", callback_data=f"spinner:{key}:-{step_b}"),
+            InlineKeyboardButton(f"−{step_s}", callback_data=f"spinner:{key}:-{step_s}"),
+            InlineKeyboardButton("✏️",         callback_data=f"spinput:{key}"),
+            InlineKeyboardButton(f"+{step_s}", callback_data=f"spinner:{key}:+{step_s}"),
+            InlineKeyboardButton(f"+{step_b}", callback_data=f"spinner:{key}:+{step_b}"),
+        ],
+        [
+            InlineKeyboardButton(display, callback_data=f"spinner:{key}:0"),
+            InlineKeyboardButton("✅ Done", callback_data="spinner:done"),
+        ],
+    ])
 
 
 def _build_settings_message(repo: ProjectRepository) -> str:
@@ -1269,10 +1313,13 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
     min_daily_rate = repo.get_min_daily_rate()
     bid_adjustment = repo.get_bid_adjustment()
     adj_sign = "+" if bid_adjustment > 0 else ""
+    poll_sec = repo.get_poll_interval()
+    poll_display = f"{poll_sec // 60}m" if poll_sec % 60 == 0 else f"{poll_sec}s"
     keyboard = [
         [
-            InlineKeyboardButton(f"💰 Budget: ${state['min_budget']}–${state['max_budget']}", callback_data="settings:budget"),
-            InlineKeyboardButton(f"⏱ Poll: {repo.get_poll_interval()}s", callback_data="settings:poll"),
+            InlineKeyboardButton(f"💰 Min: ${state['min_budget']}", callback_data="settings:budget_min"),
+            InlineKeyboardButton(f"💰 Max: ${state['max_budget']}", callback_data="settings:budget_max"),
+            InlineKeyboardButton(f"⏱ Poll: {poll_display}", callback_data="settings:poll"),
         ],
         [
             InlineKeyboardButton(f"Verified: {verified_yn}", callback_data="settings:verified"),
@@ -1284,9 +1331,9 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(f"Bid adj: {adj_sign}{bid_adjustment}%", callback_data="settings:bid_adj"),
+            InlineKeyboardButton(f"Max bids: {repo.get_max_bid_count()}", callback_data="settings:max_bids"),
         ],
         [
-            InlineKeyboardButton(f"Max bids: {repo.get_max_bid_count()} competitors", callback_data="settings:max_bids"),
             InlineKeyboardButton(f"Show skipped: {skipped_yn}", callback_data="settings:skip_notif"),
         ],
     ]
@@ -1333,78 +1380,13 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         keyboard = _get_settings_keyboard(repo)
         await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
 
-    elif action == "budget":
-        # Cycle through budget presets
-        state = get_runtime_state()
-        current = (state["min_budget"], state["max_budget"])
-        try:
-            idx = _BUDGET_PRESETS.index(current)
-            next_idx = (idx + 1) % len(_BUDGET_PRESETS)
-        except ValueError:
-            next_idx = 0
-        new_min, new_max = _BUDGET_PRESETS[next_idx]
-        state["min_budget"] = new_min
-        state["max_budget"] = new_max
-        repo.set_budget_range(new_min, new_max)
-
-        message = _build_settings_message(repo)
-        keyboard = _get_settings_keyboard(repo)
-        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
-
-    elif action == "poll":
-        # Cycle through poll presets
-        current = repo.get_poll_interval()
-        try:
-            idx = _POLL_PRESETS.index(current)
-            next_idx = (idx + 1) % len(_POLL_PRESETS)
-        except ValueError:
-            next_idx = 0
-        repo.set_poll_interval(_POLL_PRESETS[next_idx])
-
-        message = _build_settings_message(repo)
-        keyboard = _get_settings_keyboard(repo)
-        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
-
-    elif action == "daily_rate":
-        # Cycle through daily rate presets
-        current = repo.get_min_daily_rate()
-        try:
-            idx = _DAILY_RATE_PRESETS.index(current)
-            next_idx = (idx + 1) % len(_DAILY_RATE_PRESETS)
-        except ValueError:
-            next_idx = 0
-        repo.set_min_daily_rate(_DAILY_RATE_PRESETS[next_idx])
-
-        message = _build_settings_message(repo)
-        keyboard = _get_settings_keyboard(repo)
-        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
-
-    elif action == "bid_adj":
-        current = repo.get_bid_adjustment()
-        try:
-            idx = _BID_ADJUSTMENT_PRESETS.index(current)
-            next_idx = (idx + 1) % len(_BID_ADJUSTMENT_PRESETS)
-        except ValueError:
-            next_idx = 0
-        repo.set_bid_adjustment(_BID_ADJUSTMENT_PRESETS[next_idx])
-
-        message = _build_settings_message(repo)
-        keyboard = _get_settings_keyboard(repo)
-        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
-
-    elif action == "max_bids":
-        # Cycle through max competitor bid count presets
-        current = repo.get_max_bid_count()
-        try:
-            idx = _MAX_BID_COUNT_PRESETS.index(current)
-            next_idx = (idx + 1) % len(_MAX_BID_COUNT_PRESETS)
-        except ValueError:
-            next_idx = _MAX_BID_COUNT_PRESETS.index(100)  # default to 100
-        repo.set_max_bid_count(_MAX_BID_COUNT_PRESETS[next_idx])
-
-        message = _build_settings_message(repo)
-        keyboard = _get_settings_keyboard(repo)
-        await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
+    elif action in _SPINNER_CONFIG:
+        value = _spinner_get(repo, action)
+        await query.edit_message_text(
+            _build_spinner_message(action, value),
+            parse_mode="HTML",
+            reply_markup=_build_spinner_keyboard(action, value),
+        )
 
     elif action == "skip_notif":
         current = repo.get_receive_skipped()
@@ -1413,6 +1395,123 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         message = _build_settings_message(repo)
         keyboard = _get_settings_keyboard(repo)
         await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def handle_spinner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle spinner +/− buttons and Done for numeric settings."""
+    query = update.callback_query
+    await query.answer()
+
+    repo = ProjectRepository()
+    parts = query.data.split(":")  # ["spinner", key, delta] or ["spinner", "done"]
+
+    if parts[1] == "done":
+        await query.edit_message_text(
+            _build_settings_message(repo),
+            parse_mode="HTML",
+            reply_markup=_get_settings_keyboard(repo),
+        )
+        return
+
+    key = parts[1]
+    delta = int(parts[2])
+    _, _, min_val, max_val, _, _ = _SPINNER_CONFIG[key]
+
+    current = _spinner_get(repo, key)
+    new_value = max(min_val, min(max_val, current + delta))
+    if new_value != current:
+        _spinner_set(repo, key, new_value)
+
+    await query.edit_message_text(
+        _build_spinner_message(key, new_value),
+        parse_mode="HTML",
+        reply_markup=_build_spinner_keyboard(key, new_value),
+    )
+
+
+async def handle_spinput_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Open keyboard input mode for a spinner setting."""
+    query = update.callback_query
+    await query.answer()
+
+    key = query.data.split(":")[1]
+    label, unit, min_val, max_val, _, _ = _SPINNER_CONFIG[key]
+    repo = ProjectRepository()
+    current = _spinner_get(repo, key)
+    sign = "+" if current > 0 else ""
+
+    context.user_data["spinner_key"] = key
+    context.user_data["spinner_message_id"] = query.message.message_id
+
+    await query.edit_message_text(
+        f"⌨️ <b>{label}</b>\n\n"
+        f"Current: <b>{sign}{current}{unit}</b>\n"
+        f"Type a number from {min_val} to {max_val} and send:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"spincancel:{key}")]
+        ]),
+    )
+    return WAITING_SPINNER
+
+
+async def receive_spinner_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive typed value, validate, save, return to spinner."""
+    key = context.user_data.get("spinner_key")
+    msg_id = context.user_data.get("spinner_message_id")
+    if not key:
+        return ConversationHandler.END
+
+    _, unit, min_val, max_val, _, _ = _SPINNER_CONFIG[key]
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    try:
+        value = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text(f"❌ Enter a whole number ({min_val}…{max_val})", parse_mode="HTML")
+        return WAITING_SPINNER
+
+    if not (min_val <= value <= max_val):
+        await update.message.reply_text(f"❌ Must be between {min_val} and {max_val}", parse_mode="HTML")
+        return WAITING_SPINNER
+
+    repo = ProjectRepository()
+    _spinner_set(repo, key, value)
+
+    context.user_data.pop("spinner_key", None)
+    context.user_data.pop("spinner_message_id", None)
+
+    await context.bot.edit_message_text(
+        chat_id=update.message.chat_id,
+        message_id=msg_id,
+        text=_build_spinner_message(key, value),
+        parse_mode="HTML",
+        reply_markup=_build_spinner_keyboard(key, value),
+    )
+    return ConversationHandler.END
+
+
+async def handle_spincancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel keyboard input, return to spinner without saving."""
+    query = update.callback_query
+    await query.answer()
+
+    key = query.data.split(":")[1]
+    context.user_data.pop("spinner_key", None)
+    context.user_data.pop("spinner_message_id", None)
+
+    repo = ProjectRepository()
+    current = _spinner_get(repo, key)
+    await query.edit_message_text(
+        _build_spinner_message(key, current),
+        parse_mode="HTML",
+        reply_markup=_build_spinner_keyboard(key, current),
+    )
+    return ConversationHandler.END
 
 
 async def cmd_setverified(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2227,6 +2326,21 @@ def setup_handlers(application: Application):
 
     # Settings callbacks
     application.add_handler(CallbackQueryHandler(handle_settings_callback, pattern="^settings:"))
+    application.add_handler(CallbackQueryHandler(handle_spinner_callback, pattern="^spinner:"))
+
+    # Spinner keyboard input
+    spinner_input_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(handle_spinput_callback, pattern="^spinput:")],
+        states={
+            WAITING_SPINNER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_spinner_value),
+                CallbackQueryHandler(handle_spincancel_callback, pattern="^spincancel:"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_edit)],
+        per_message=False,
+    )
+    application.add_handler(spinner_input_handler)
 
     # Control panel Start/Stop callbacks
     application.add_handler(CallbackQueryHandler(handle_control_callback, pattern="^control:"))
@@ -2278,4 +2392,4 @@ def setup_handlers(application: Application):
     # Global error handler
     application.add_error_handler(error_handler)
 
-    logger.info("Telegram handlers registered")
+    logger.debug("Telegram handlers registered")

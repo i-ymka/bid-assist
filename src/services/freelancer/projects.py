@@ -54,7 +54,7 @@ class ProjectService:
             "owner_info": "true",
         }
 
-        logger.info(f"Fetching active projects...")
+        logger.debug(f"Fetching active projects...")
 
         try:
             response = self._client.get(PROJECTS_ACTIVE_ENDPOINT, params=params)
@@ -78,16 +78,16 @@ class ProjectService:
                         or upgrades.get("preferred", False)
                     )
                     if is_preferred:
-                        logger.info(f"Skipping project {p.get('id')} - preferred freelancer only (upgrades: {upgrades})")
+                        logger.debug(f"Skipping project {p.get('id')} - preferred-only")
                         continue
 
                 project = Project.from_api_response(p, users)
                 projects.append(project)
 
             if should_skip_preferred:
-                logger.info(f"Fetched {len(projects)} active projects (filtered preferred-only)")
+                logger.debug(f"Fetched {len(projects)} active projects (filtered preferred-only)")
             else:
-                logger.info(f"Fetched {len(projects)} active projects (including preferred-only)")
+                logger.debug(f"Fetched {len(projects)} active projects (including preferred-only)")
             return projects
 
         except Exception as e:
@@ -231,6 +231,60 @@ class ProjectService:
 
         except Exception as e:
             logger.warning(f"Could not fetch owner country for project {project_id}: {e}")
+            return None
+
+    def get_project_owner_display_name(self, project_id: int) -> Optional[str]:
+        """Fetch the project owner's display name (public_name) for bid greeting.
+
+        Strategy:
+        1. Fetch bids for project → get project_owner_id from first bid
+        2. Fetch /users/0.1/users/{owner_id}/ → return public_name or display_name
+        Falls back to None if bids endpoint has no bids or user lookup fails.
+
+        Args:
+            project_id: The project ID.
+
+        Returns:
+            Owner display name string, or None if unavailable.
+        """
+        try:
+            # Step 1: get owner_id from bids endpoint
+            endpoint = PROJECT_BIDS_ENDPOINT.format(project_id=project_id)
+            response = self._client.get(endpoint, params={"limit": 1, "user_details": "true"})
+            result = response.get("result", {})
+            bids = result.get("bids", [])
+
+            owner_id = None
+            if bids:
+                owner_id = bids[0].get("project_owner_id")
+
+            # Also check users dict from bids response
+            if owner_id:
+                users = result.get("users", {})
+                user = users.get(str(owner_id)) or users.get(owner_id)
+                if user:
+                    name = user.get("public_name") or user.get("display_name")
+                    if name:
+                        logger.debug(f"Project {project_id}: owner display_name='{name}' (from bids users dict)")
+                        return name
+
+            # Step 2: fetch user profile directly
+            if owner_id:
+                user_response = self._client.get(
+                    f"/users/0.1/users/{owner_id}/",
+                    params={"compact": "true"},
+                )
+                user_result = user_response.get("result", {})
+                name = user_result.get("public_name") or user_result.get("display_name")
+                if name:
+                    logger.debug(f"Project {project_id}: owner display_name='{name}' (from user profile)")
+                    return name
+
+            logger.debug(f"Project {project_id}: owner display_name not found")
+            return None
+
+        except Exception as e:
+            logger.debug(f"get_project_owner_display_name({project_id}) failed: {e}")
             return None
 
     def get_portfolio_count(self, user_id: int) -> Optional[int]:

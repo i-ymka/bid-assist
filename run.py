@@ -30,13 +30,38 @@ if _known.env is None:
     # No --env given → launch both accounts as subprocesses
     import subprocess
     import threading
+    import pyfiglet
+    from rich.console import Console as _RootConsole
+    from rich.text import Text as _RootText
+    from rich.align import Align as _RootAlign
+    from rich.rule import Rule as _RootRule
 
     _ACCOUNTS = {"yehia": ".env.yehia", "ymka": ".env.ymka"}
 
+    # Print banner once from parent
+    _rc = _RootConsole(force_terminal=True)
+    _GRAD = ["#5B2FD4","#6B3FE4","#7B4FF4","#8B5FFF","#9B70FF","#AB80FF","#BB90FF","#CCAAFF"]
+    _rc.print()
+    for _art_word, _offset in [("BID", 0), ("ASSIST", 3)]:
+        for _i, _line in enumerate(pyfiglet.figlet_format(_art_word, font="larry3d").rstrip("\n").split("\n")):
+            _t = _RootText(_line)
+            _t.stylize(f"bold {_GRAD[(_i + _offset) % len(_GRAD)]}")
+            _rc.print(_RootAlign(_t, align="center"))
+    _rc.print()
+    _rc.print(_RootRule(style="#7B4FF4"))
+    _rc.print(f"  [dim]accounts[/dim] [bold #AB80FF]{' · '.join(_ACCOUNTS.keys())}[/bold #AB80FF]", justify="center")
+    _rc.print(_RootRule(style="#7B4FF4"))
+    _rc.print()
+
+    import re as _re
+    _ANSI_RE = _re.compile(r"\x1b\[[0-9;]*[mK]|\x1b\][^\x07]*\x07|\r")
+
     def _stream(proc, prefix):
         for line in iter(proc.stdout.readline, b""):
-            sys.stdout.write(f"[{prefix}] {line.decode(errors='replace')}")
-            sys.stdout.flush()
+            decoded = line.decode(errors="replace").rstrip()
+            if _ANSI_RE.sub("", decoded).strip():  # skip ANSI-only / blank lines
+                sys.stdout.write(f"[{prefix}]{' ' * (5 - len(prefix))} {decoded}\n")
+                sys.stdout.flush()
 
     _procs = {
         name: subprocess.Popen(
@@ -79,29 +104,121 @@ from src.models import AIAnalysis
 from src.models.bid import Bid, Verdict
 from src.filters import CountryFilter, BudgetFilter, BlacklistFilter
 
-# Configure logging with file output
+# Configure logging: Rich for console (INFO+), plain text for file (DEBUG+)
+import pyfiglet
+from rich.logging import RichHandler
+from rich.console import Console
+from rich.theme import Theme
+from rich.text import Text
+from rich.align import Align
+from rich.rule import Rule
+
+_console_theme = Theme({
+    "logging.level.info":    "bold cyan",
+    "logging.level.warning": "bold yellow",
+    "logging.level.error":   "bold red",
+    "logging.level.critical":"bold white on red",
+    "logging.level.debug":   "dim white",
+})
+_console = Console(theme=_console_theme, force_terminal=True)
+
+class _LevelPrefix(logging.Filter):
+    """Inject colored level tag into messages (since show_level=False).
+    WARN/ERR/CRIT get colored tags. INFO gets blank padding unless it already
+    starts with a status word like PASS/SKIP/BID►/LIVE (those carry their own color)."""
+    _TAGS = {
+        logging.WARNING:  "[bold yellow]WARN[/bold yellow]  ",
+        logging.ERROR:    "[bold red]ERR! [/bold red] ",
+        logging.CRITICAL: "[bold white on red]CRIT[/bold white on red] ",
+    }
+    _BLANK = "      "  # 6 spaces — same width as "WARN  "
+    def filter(self, record):
+        tag = self._TAGS.get(record.levelno)
+        if tag:
+            try:
+                record.msg = tag + record.getMessage()
+            except Exception:
+                record.msg = tag + str(record.msg)
+            record.args = ()
+        elif record.levelno == logging.INFO:
+            msg = str(record.msg)
+            if not msg.startswith("[bold"):
+                try:
+                    record.msg = self._BLANK + record.getMessage()
+                except Exception:
+                    record.msg = self._BLANK + msg
+                record.args = ()
+        return True
+
+_rich_handler = RichHandler(
+    console=_console,
+    show_path=False,
+    show_level=False,
+    omit_repeated_times=True,
+    rich_tracebacks=True,
+    tracebacks_show_locals=False,
+    markup=True,
+    log_time_format="[%H:%M:%S]",
+)
+_rich_handler.addFilter(_LevelPrefix())
+_rich_handler.setLevel(logging.INFO)
+
+_file_handler = logging.FileHandler("logs/bot_debug.log")
+_file_handler.setLevel(logging.DEBUG)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+
 logging.basicConfig(
     level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("logs/bot_debug.log"),
-        logging.StreamHandler()
-    ]
+    handlers=[_rich_handler, _file_handler],
+    format="%(message)s",
+    datefmt="[%H:%M:%S]",
 )
 logger = logging.getLogger(__name__)
-# Set third-party loggers to WARNING to reduce noise
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.WARNING)
+
+# Silence noisy third-party loggers
+for _noisy in ("httpx", "httpcore", "telegram", "telegram.ext.Updater", "hpack", "asyncio",
+               "apscheduler", "apscheduler.scheduler", "apscheduler.executors.default"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logging.getLogger("telegram.ext.Updater").setLevel(logging.CRITICAL)
+logging.getLogger("apscheduler").setLevel(logging.CRITICAL)
 
 # Global flag for graceful shutdown
 shutdown_event = asyncio.Event()
 
 
-async def polling_loop(repo: ProjectRepository, project_service: ProjectService, bidding_service: BiddingService):
+def _print_banner(account: str, model: str, bid_model: str, pool_count: int) -> None:
+    """Print a startup banner with gradient ASCII art."""
+    _GRAD = ["#5B2FD4", "#6B3FE4", "#7B4FF4", "#8B5FFF", "#9B70FF", "#AB80FF", "#BB90FF", "#CCAAFF"]
+
+    def _gradient_line(line: str, offset: int = 0) -> Text:
+        t = Text(line)
+        t.stylize(f"bold {_GRAD[(offset) % len(_GRAD)]}")
+        return t
+
+    bid_art   = pyfiglet.figlet_format("BID",    font="larry3d").rstrip("\n").split("\n")
+    assist_art = pyfiglet.figlet_format("ASSIST", font="larry3d").rstrip("\n").split("\n")
+
+    _console.print()
+    for i, line in enumerate(bid_art):
+        _console.print(Align(_gradient_line(line, i), align="center"))
+    for i, line in enumerate(assist_art):
+        _console.print(Align(_gradient_line(line, i + 3), align="center"))
+    _console.print()
+    _console.print(Rule(style="#7B4FF4"))
+    _console.print(
+        f"  [dim]account[/dim] [bold #AB80FF]{account}[/bold #AB80FF]"
+        f"    [dim]analyze[/dim] [bold #AB80FF]{model}[/bold #AB80FF]"
+        f"    [dim]bid[/dim] [bold #AB80FF]{bid_model}[/bold #AB80FF]"
+        f"    [dim]pool[/dim] [bold #AB80FF]{pool_count} accounts[/bold #AB80FF]",
+        justify="center",
+    )
+    _console.print(Rule(style="#7B4FF4"))
+    _console.print()
+
+
+async def polling_loop(repo: ProjectRepository, project_service: ProjectService, bidding_service: BiddingService, shared_repo: SharedAnalysisRepository):
     """Background task that polls Freelancer API for new projects."""
-    logger.info("Polling loop started")
+    logger.debug("Polling loop started")
 
     while not shutdown_event.is_set():
         try:
@@ -111,7 +228,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 continue
 
             interval = repo.get_poll_interval()
-            logger.info(f"--- Polling cycle (interval: {interval}s) ---")
+            logger.debug(f"--- Polling cycle (interval: {interval}s) ---")
 
             # Use skill_ids from .env
             skill_ids = settings.skill_ids
@@ -127,7 +244,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
 
             # Initialize filters (budget range is read from DB each cycle — user can change it live)
             budget_min, budget_max = repo.get_budget_range()
-            logger.info(f"Budget filter: ${budget_min}-${budget_max}")
+            logger.debug(f"Budget filter: ${budget_min}-${budget_max}")
             budget_filter = BudgetFilter(min_budget=budget_min, max_budget=budget_max)
             blacklist_filter = BlacklistFilter()
             country_filter = CountryFilter()
@@ -140,9 +257,16 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 if repo.is_processed(project.id) or repo.is_in_queue(project.id):
                     continue
 
+                # Skip if another account already claimed or finished analysis
+                if shared_repo.is_claimed(project.id):
+                    cached = shared_repo.get_result(project.id)
+                    if cached and cached.get("verdict") == "SKIP":
+                        repo.add_processed_project(project.id)
+                    continue
+
                 # Skip if already bid on (from Freelancer API)
                 if project.id in already_bid_ids:
-                    logger.info(f"SKIPPED project {project.id}: already bid on")
+                    logger.debug(f"SKIPPED {project.id}: already bid on")
                     repo.add_processed_project(project.id)
                     already_bid_count += 1
                     continue
@@ -150,7 +274,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 # Apply budget filter (no API call needed)
                 if not budget_filter.passes(project):
                     reason = budget_filter.get_rejection_reason(project)
-                    logger.info(f"FILTERED project {project.id}: {reason}")
+                    logger.debug(f"FILTERED {project.id}: {reason}")
                     repo.add_processed_project(project.id)
                     filtered_count += 1
                     continue
@@ -159,7 +283,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 if settings.blocked_currencies:
                     project_currency = project.currency.code.upper()
                     if project_currency in settings.blocked_currencies:
-                        logger.info(f"FILTERED project {project.id}: Currency '{project_currency}' is blocked")
+                        logger.debug(f"FILTERED {project.id}: currency {project_currency} blocked")
                         repo.add_processed_project(project.id)
                         filtered_count += 1
                         continue
@@ -168,7 +292,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 if settings.allowed_languages:
                     project_lang = project.language.lower()
                     if project_lang not in settings.allowed_languages:
-                        logger.info(f"FILTERED project {project.id}: Language '{project_lang}' not in allowed list {settings.allowed_languages}")
+                        logger.debug(f"FILTERED {project.id}: language {project_lang}")
                         repo.add_processed_project(project.id)
                         filtered_count += 1
                         continue
@@ -176,7 +300,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 # Apply max bid count filter (early gate to avoid wasting AI calls)
                 max_bids = repo.get_max_bid_count()
                 if project.bid_stats.bid_count > max_bids:
-                    logger.info(f"FILTERED project {project.id}: Too many bids ({project.bid_stats.bid_count} > {max_bids})")
+                    logger.debug(f"FILTERED {project.id}: {project.bid_stats.bid_count} bids > limit {max_bids}")
                     repo.add_processed_project(project.id)
                     filtered_count += 1
                     continue
@@ -185,14 +309,14 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 if project.time_submitted:
                     age_hours = (datetime.utcnow() - project.time_submitted).total_seconds() / 3600
                     if age_hours > settings.max_project_age_hours:
-                        logger.info(f"FILTERED project {project.id}: Too old ({age_hours:.1f}h > {settings.max_project_age_hours}h)")
+                        logger.debug(f"FILTERED {project.id}: too old ({age_hours:.1f}h)")
                         repo.add_processed_project(project.id)
                         filtered_count += 1
                         continue
 
                 # Apply preferred-only filter
                 if repo.skip_preferred_only() and project.is_preferred_only:
-                    logger.info(f"FILTERED project {project.id}: Preferred freelancer only (upgrades: {project.upgrades})")
+                    logger.debug(f"FILTERED {project.id}: preferred-only")
                     repo.add_processed_project(project.id)
                     filtered_count += 1
                     continue
@@ -200,7 +324,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 # Apply blacklist filter
                 if not blacklist_filter.passes(project):
                     reason = blacklist_filter.get_rejection_reason(project)
-                    logger.info(f"FILTERED project {project.id}: {reason}")
+                    logger.debug(f"FILTERED {project.id}: {reason}")
                     repo.add_processed_project(project.id)
                     filtered_count += 1
                     continue
@@ -214,7 +338,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                     requires_verification = False
                     for keyword in settings.verification_keywords:
                         if keyword in text_to_check:
-                            logger.info(f"FILTERED project {project.id}: Requires verified account (keyword: '{keyword}')")
+                            logger.debug(f"FILTERED {project.id}: requires verified account ('{keyword}')")
                             repo.add_processed_project(project.id)
                             filtered_count += 1
                             requires_verification = True
@@ -222,26 +346,21 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                     if requires_verification:
                         continue
 
-                # Fetch owner country (API doesn't include it in active projects)
-                # This is needed for accurate country filtering
-                logger.debug(f"Project {project.id}: initial country = '{project.owner.country}'")
+                # Fetch owner country
                 if not project.owner.country or project.owner.country == "Unknown":
                     owner_country = project_service.get_project_owner_country(project.id)
-                    logger.debug(f"Project {project.id}: fetched country = '{owner_country}'")
                     if owner_country:
                         project.owner.country = owner_country
                     else:
                         project.owner.country = "Unknown"
-                logger.info(f"Project {project.id}: final country = '{project.owner.country}'")
 
                 # Apply country filter
                 if not country_filter.passes(project):
                     reason = country_filter.get_rejection_reason(project)
-                    logger.info(f"FILTERED project {project.id}: {reason}")
-                    repo.add_processed_project(project.id)  # Mark as processed so we don't fetch again
+                    logger.debug(f"FILTERED {project.id}: {reason}")
+                    repo.add_processed_project(project.id)
                     filtered_count += 1
                     continue
-                logger.info(f"PASSED project {project.id} from {project.owner.country}")
 
                 # Extract skill names for keyword matching
                 skill_names = ",".join([job.name for job in project.jobs])
@@ -264,10 +383,14 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                     owner_display_name=project.owner.display_name or "",
                     is_preferred_only=project.is_preferred_only,
                 )
+                logger.info(f"[bold cyan]QUEUE[/bold cyan]  {project.title[:60]}  [{project.owner.country}]")
                 new_count += 1
 
             pending = repo.get_queue_count("pending")
-            logger.info(f"Polling complete: {new_count} new, {filtered_count} filtered, {already_bid_count} already bid, {pending} pending")
+            if new_count > 0:
+                logger.info(f"Polling: +{new_count} queued, {pending} pending")
+            else:
+                logger.debug(f"Polling: 0 new, {pending} pending")
 
             # Save poll stats for /status command
             total_found = new_count + filtered_count + already_bid_count
@@ -370,7 +493,7 @@ def _recheck_queue_filters(project_data: dict, repo: ProjectRepository) -> "Opti
 
 async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo: SharedAnalysisRepository, project_service: ProjectService):
     """Background task that analyzes projects with Gemini AI."""
-    logger.info("Analysis loop started")
+    logger.debug("Analysis loop started")
 
     while not shutdown_event.is_set():
         project_id = None  # Reset each iteration so except block can check if a project was in-flight
@@ -392,12 +515,10 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
             # Catches: aged-out projects, budget/blacklist/country/verified/preferred changes.
             skip_reason = _recheck_queue_filters(project_data, repo)
             if skip_reason:
-                logger.info(f"RECHECK-FILTERED project {project_id}: {skip_reason}")
+                logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  ({skip_reason})")
                 repo.remove_from_queue(project_id)
                 repo.add_processed_project(project_id)
                 continue
-
-            logger.info(f"Analyzing: {project_data['title'][:50]}...")
 
             # Format budget string
             budget_min = project_data.get("budget_min", 0)
@@ -412,15 +533,25 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
             budget_max_usd = to_usd(budget_max, currency) if budget_max else 0
             avg_bid_usd = to_usd(avg_bid, currency) if avg_bid else 0
 
-            if currency != "USD" and (budget_min or budget_max):
-                logger.info(f"Currency conversion: {budget_min:.0f}-{budget_max:.0f} {currency} → {budget_min_usd:.0f}-{budget_max_usd:.0f} USD")
-
             if budget_min_usd and budget_max_usd:
                 budget_str = f"{budget_min_usd:.0f} - {budget_max_usd:.0f} USD"
             elif budget_max_usd:
                 budget_str = f"up to {budget_max_usd:.0f} USD"
             else:
                 budget_str = "Not specified"
+
+            # Pre-filter: estimate our bid price before spending Gemini tokens.
+            # If avg_bid * bid_adjustment is already below min_daily_rate, skip immediately.
+            _min_daily_rate = repo.get_min_daily_rate()
+            _bid_adjustment = repo.get_bid_adjustment()
+            _raw = avg_bid_usd if avg_bid_usd > 0 else (budget_min_usd + budget_max_usd) / 2
+            if _raw > 0:
+                _target_est = _raw * (1 + _bid_adjustment / 100)
+                if _target_est < _min_daily_rate:
+                    logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  (${_target_est:.0f} < ${_min_daily_rate}/d)")
+                    repo.remove_from_queue(project_id)
+                    repo.add_processed_project(project_id)
+                    continue
 
             # --- Shared analysis cache: avoid duplicate Call 1 across accounts ---
             loop = asyncio.get_event_loop()
@@ -430,19 +561,31 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                 # No cached result — try to claim the Call 1 slot
                 claimed = shared_repo.try_claim(project_id)
                 if not claimed:
-                    # Another account is currently running Call 1 for this project — defer
-                    logger.info(f"Project {project_id}: Call 1 deferred (claimed by another account, retrying next cycle)")
-                    await asyncio.sleep(5)
-                    continue
+                    # Another account is running Call 1 — wait for their result (up to 2 min)
+                    logger.debug(f"Project {project_id}: waiting for Call 1 from another account...")
+                    deadline = loop.time() + 120
+                    while loop.time() < deadline:
+                        await asyncio.sleep(5)
+                        cached_feasibility = shared_repo.get_result(project_id)
+                        if cached_feasibility is not None:
+                            break
+                    if cached_feasibility is None:
+                        logger.debug(f"Project {project_id}: no Call 1 result after 2 min, removing from queue")
+                        repo.remove_from_queue(project_id)
+                        continue
 
                 # We own the slot — run Call 1 exclusively
-                logger.info(f"Project {project_id}: running Call 1 (shared cache miss)")
+                logger.info(f"[bold white]WORK[/bold white]  {project_data['title'][:60]}")
                 repo.mark_queue_status(project_id, "analyzing")
-                raw_feasibility = await loop.run_in_executor(
-                    None, analyze_feasibility,
-                    project_id, project_data["title"], project_data["description"],
-                    budget_str, avg_bid_usd, bid_count,
-                )
+                try:
+                    raw_feasibility = await loop.run_in_executor(
+                        None, analyze_feasibility,
+                        project_id, project_data["title"], project_data["description"],
+                        budget_str, avg_bid_usd, bid_count,
+                    )
+                except Exception:
+                    shared_repo.release_claim(project_id)
+                    raise
                 if raw_feasibility:
                     shared_repo.store_result(
                         project_id,
@@ -452,11 +595,19 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                     )
                     cached_feasibility = raw_feasibility
                 else:
-                    # Call 1 failed — release slot so other accounts can retry later
+                    # Call 1 failed — release slot so other accounts can retry later, skip Call 2
                     shared_repo.release_claim(project_id)
+                    continue
             else:
-                logger.info(f"Project {project_id}: using cached Call 1 result (verdict={cached_feasibility['verdict']})")
+                logger.debug(f"Project {project_id}: using cached Call 1 result (verdict={cached_feasibility['verdict']})")
+                # If another account already decided SKIP, mark processed locally so we don't re-queue
+                if cached_feasibility.get("verdict") == "SKIP":
+                    repo.remove_from_queue(project_id)
+                    repo.add_processed_project(project_id)
+                    continue
                 repo.mark_queue_status(project_id, "analyzing")
+
+            owner_name = ""  # Freelancer API does not expose owner display name to freelancers
 
             # Run Gemini analysis (Call 2 always per-account; Call 1 skipped if cached)
             min_daily_rate = repo.get_min_daily_rate()
@@ -474,28 +625,32 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                     budget_min_usd,
                     budget_max_usd,
                     min_daily_rate,
-                    project_data.get("owner_display_name") or project_data.get("owner_username", ""),
+                    owner_name,
                     bid_adjustment,
                     cached_feasibility,  # None → analyze_project runs Call 1 itself (fallback)
                 ),
             )
 
             if not result:
-                logger.error(f"Analysis failed for {project_id}")
-                repo.remove_from_queue(project_id)
+                logger.error(f"FAILED  {project_data['title'][:55]}")
                 # Check if all Gemini accounts hit quota — notify user once and pause 30 min
                 if consume_exhaustion_flag():
                     logger.warning("All Gemini accounts exhausted — sending notification, pausing 30 min")
                     await notifier.send_quota_exhausted_notification()
+                    # Reset project to pending so we retry it after the sleep — do NOT re-queue from poll
+                    repo.mark_queue_status(project_id, "pending")
+                    shared_repo.release_claim(project_id)
                     await asyncio.sleep(1800)
-                # Don't add to processed — next poll cycle will retry if project still passes filters
+                else:
+                    # Transient failure — remove so next poll cycle can re-queue and retry
+                    repo.remove_from_queue(project_id)
                 continue
 
             # Convert code-calculated USD amount to project currency
             if currency != "USD" and result.verdict == "BID" and result.amount > 0:
                 original_usd = result.amount
                 result.amount = round_up_10(from_usd(result.amount, currency))
-                logger.info(f"Amount conversion: {original_usd:.0f} USD → {result.amount} {currency}")
+                logger.debug(f"Amount conversion: {original_usd:.0f} USD → {result.amount} {currency}")
 
             # Mark as processed
             repo.mark_queue_status(project_id, "processed")
@@ -616,7 +771,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                                     )
                                 )
 
-                            logger.info(f"AUTO-BID SUCCESS: {project_id} - ${result.amount} (remaining: {remaining_bids})")
+                            logger.info(f"[bold blue]LIVE[/bold blue]  {project_data['title'][:55]}  ${result.amount}  (bids left: {remaining_bids})")
                         else:
                             # Check if error is about bid limit
                             error_lower = bid_result.message.lower()
@@ -719,7 +874,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                                     original_keyboard=orig_keyboard,
                                 )
                             )
-                        logger.info(f"BID notification sent to {chat_id} for {project_id}")
+                        logger.info(f"[bold bright_magenta]BID[/bold bright_magenta]  {project_data['title'][:55]}  ${result.amount}  ({result.period}d)")
             else:
                 # SKIP verdict — send notification if receive_skipped is enabled
                 if repo.get_receive_skipped():
@@ -735,9 +890,9 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                             url=project_data.get("url", ""),
                             summary=result.summary,
                         )
-                    logger.info(f"SKIP notification sent for {project_id}")
+                    logger.info(f"[bold red]SKIP[/bold red]  {project_data['title'][:55]}")
                 else:
-                    logger.info(f"SKIP notification muted for {project_id}")
+                    logger.debug(f"SKIP (muted)  {project_data['title'][:55]}")
 
         except Exception as e:
             logger.error(f"Analysis error: {e}", exc_info=True)
@@ -751,7 +906,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
 
 async def cleanup_loop(repo: ProjectRepository, shared_repo: SharedAnalysisRepository):
     """Background task that cleans up old data."""
-    logger.info("Cleanup loop started")
+    logger.debug("Cleanup loop started")
 
     while not shutdown_event.is_set():
         try:
@@ -770,20 +925,11 @@ async def cleanup_loop(repo: ProjectRepository, shared_repo: SharedAnalysisRepos
 
 async def main():
     """Main entry point."""
-    logger.info("=" * 50)
-    logger.info("Bid-Assist starting...")
-    logger.info("=" * 50)
-    logger.info("Filter settings:")
-    logger.info("  Budget, poll interval: configured in bot via /settings")
-    logger.info(f"  Max project age: {settings.max_project_age_hours}h")
-    logger.info(f"  Max bid count: {settings.max_bid_count}")
-    logger.info(f"  Blacklist: {settings.blacklist_keywords or '(none)'}")
-    logger.info(f"  Skills: {len(settings.skill_ids)} configured")
-    logger.info("=" * 50)
 
     # Initialize services
     repo = ProjectRepository()
     shared_repo = SharedAnalysisRepository(Path(settings.db_path).parent / "shared_analysis.db")
+    shared_repo.release_stale_claims()  # clean up any in_progress claims left from a previous crashed run
     client = FreelancerClient()
     project_service = ProjectService(client)
     bidding_service = BiddingService(client)
@@ -797,23 +943,9 @@ async def main():
                       f"{result.get('queue_cleared', 0)} queue, "
                       f"{result.get('pending_cleared', 0)} pending")
 
-    # Log chat IDs
-    logger.info(f"Telegram chat IDs: {settings.telegram_chat_ids}")
-
     # Record bot start time
     repo.set_bot_start_time()
-
-    # Log country filter settings
-    logger.info(f"Country filter:")
-    logger.info(f"  Blocked: {settings.blocked_countries or '(none)'}")
-    logger.info(f"  Allowed: {settings.allowed_countries or '(all)'}")
-    logger.info(f"  Block unknown: {settings.block_unknown_countries}")
-    logger.info(f"Currency filter: blocked {settings.blocked_currencies or '(none)'}")
-    logger.info(f"Language filter: {settings.allowed_languages or '(all)'}")
-    logger.info(f"Verified account: {repo.is_verified()}")
-    if not repo.is_verified():
-        logger.info(f"  Filtering keywords: {settings.verification_keywords}")
-    logger.info(f"Skip preferred-only projects: {repo.skip_preferred_only()}")
+    logger.info(f"Bot started — account: {settings.username} | model: {settings.gemini_model} → {settings.bid_model}")
 
     # Build Telegram application
     try:
@@ -855,12 +987,12 @@ async def main():
         BotCommand("help", "Help"),
     ])
 
-    logger.info("Telegram bot started")
-    logger.info("Press Ctrl+C to stop")
+    logger.debug("Telegram bot started")
+    logger.debug("Press Ctrl+C to stop")
 
     # Start background tasks
     tasks = [
-        asyncio.create_task(polling_loop(repo, project_service, bidding_service)),
+        asyncio.create_task(polling_loop(repo, project_service, bidding_service, shared_repo)),
         asyncio.create_task(analysis_loop(repo, notifier, shared_repo, project_service)),
         asyncio.create_task(cleanup_loop(repo, shared_repo)),
     ]

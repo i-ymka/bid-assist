@@ -110,6 +110,17 @@ class SharedAnalysisRepository:
         except sqlite3.Error as e:
             logger.error(f"shared_analysis store_result({project_id}): {e}")
 
+    def is_claimed(self, project_id: int) -> bool:
+        """Return True if project is already in shared_analysis (in_progress or finished)."""
+        try:
+            row = self._conn.execute(
+                "SELECT 1 FROM shared_analysis WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            return row is not None
+        except sqlite3.Error:
+            return False
+
     def release_claim(self, project_id: int):
         """Delete an in_progress slot so other accounts can retry later.
 
@@ -123,6 +134,22 @@ class SharedAnalysisRepository:
                 )
         except sqlite3.Error as e:
             logger.error(f"shared_analysis release_claim({project_id}): {e}")
+
+    def release_stale_claims(self, max_age_minutes: int = 30) -> int:
+        """Release in_progress claims older than max_age_minutes (e.g. left from a crashed run)."""
+        try:
+            with self._conn:
+                cursor = self._conn.execute(
+                    "DELETE FROM shared_analysis WHERE status = 'in_progress' AND created_at < datetime('now', ? || ' minutes')",
+                    (f"-{max_age_minutes}",),
+                )
+                removed = cursor.rowcount
+                if removed:
+                    logger.info(f"shared_analysis: released {removed} stale in_progress claims (>{max_age_minutes}min)")
+                return removed
+        except sqlite3.Error as e:
+            logger.error(f"shared_analysis release_stale_claims: {e}")
+            return 0
 
     def cleanup_stale(self, max_age_hours: float = 24) -> int:
         """Remove stale in_progress entries and expired cache rows.

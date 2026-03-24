@@ -896,9 +896,9 @@ async def schedule_bid_update(
                         disable_web_page_preview=True,
                     )
                     if rank:
-                        logger.info(f"Bids line updated for {project_id}: #{rank} out of {total} (avg: {avg:.0f})")
+                        logger.info(f"      rank #{rank} of {total} bids, avg ${avg:.0f}")
                     else:
-                        logger.info(f"Bids line updated for {project_id}: {total} bids (avg: {avg:.0f})")
+                        logger.info(f"      {total} bids, avg ${avg:.0f}")
                 except Exception as edit_err:
                     logger.error(f"Failed to edit message for {project_id}: {edit_err}")
             else:

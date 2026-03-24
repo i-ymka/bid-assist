@@ -289,7 +289,7 @@ class BiddingService:
             if response.get("status") == "success":
                 bids = response.get("result", {}).get("bids", [])
                 project_ids = {bid.get("project_id") for bid in bids if bid.get("project_id")}
-                logger.info(f"Found {len(project_ids)} projects already bid on")
+                logger.debug(f"Found {len(project_ids)} projects already bid on")
                 return project_ids
 
             logger.warning("Could not fetch user's bids")

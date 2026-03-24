@@ -16,8 +16,8 @@
 |-----------|-----------|--------|--------|
 | Язык | Python | 3.11 | OK (EOL: Oct 2027) |
 | Telegram SDK | python-telegram-bot | 20.x+ (cap убран) | OK (v22.6 доступна) |
-| AI анализ (Call 1) | Gemini CLI | gemini-3.1-pro-preview | OK (fallback: 2.5-pro; timeout 1200s; HIGH thinking) |
-| AI бид (Call 2) | Gemini CLI | gemini-2.5-flash | OK (fallback: 2.5-pro) |
+| AI анализ (Call 1) | Gemini CLI | gemini-3.1-pro-preview (pro) / gemini-3-pro-preview (pool) | OK (timeout 1200s; HIGH thinking; multi-account pool) |
+| AI бид (Call 2) | Gemini CLI | gemini-3.1-flash-lite-preview (pro) / gemini-3-flash-preview (pool) | OK (pool rotation on 429) |
 | HTTP-клиент | requests | 2.28+ | OK |
 | Валидация | pydantic + pydantic-settings | v2.x | OK (2.12.5 доступна) |
 | БД | SQLite | встроенная | OK |
@@ -101,6 +101,17 @@
 - [x] Кнопки «✏️ Edit Amount» и «✏️ Edit Proposal» сохраняются в сообщении с предупреждением
 - [x] `escape_markdown_v2` вынесен в верхний импорт `handlers.py`
 
+### v2.9 — Multi-account Gemini pool + Spinner UX (DONE)
+- [x] `GEMINI_HOME_PRIMARY` + `GEMINI_HOME_POOL` в .env — 1 pro + N бесплатных аккаунтов
+- [x] `_run_gemini_cli(prompt, primary_model, pool_model)` — пробует pro, затем pool по очереди
+- [x] Cooldown per `(home_dir, model)` на 1ч при 429 QUOTA_EXHAUSTED
+- [x] `consume_exhaustion_flag()` — `analysis_loop` детектирует полное исчерпание → sleep 30 мин
+- [x] `send_quota_exhausted_notification()` в `notifier.py` — Telegram-уведомление при полном исчерпании
+- [x] Pro-модели: `gemini-3.1-pro-preview` (Call 1), `gemini-3.1-flash-lite-preview` (Call 2)
+- [x] Pool-модели: `gemini-3-pro-preview` (Call 1 fallback), `gemini-3-flash-preview` (Call 2 fallback)
+- [x] Spinner ✏️ — кнопка для ввода точного числа с клавиатуры (ConversationHandler `WAITING_SPINNER`)
+- [x] `escape_markdown_v2` вынесен в верхний импорт `handlers.py`
+
 ### v3.0 — Масштабирование (FUTURE)
 - [ ] Dashboard (web-интерфейс) для аналитики
 - [ ] A/B-тестирование bid-текстов
@@ -111,10 +122,10 @@
 
 ## Текущий статус
 
-**Версия:** 2.8.0
+**Версия:** 2.9.0
 **Состояние:** Рабочий проект, используется в продакшене. Два аккаунта: yehia + ymka.
 
-**Что готово:** Полный цикл — от обнаружения проекта до подачи ставки. Telegram-бот с командами, авто-бид, AI-анализ, двойная фильтрация (до и после очереди), история, статистика. Bid-качество улучшено (anti-bot check, personalized hook, запрет клише, мягкие CTA). Мульти-аккаунт из коробки. Настраиваемый % отклонения цены от рынка. Shared AI cache между аккаунтами.
+**Что готово:** Полный цикл — от обнаружения проекта до подачи ставки. Telegram-бот с командами, авто-бид, AI-анализ, двойная фильтрация (до и после очереди), история, статистика. Bid-качество улучшено (anti-bot check, personalized hook, запрет клише, мягкие CTA). Мульти-аккаунт из коробки. Настраиваемый % отклонения цены от рынка. Shared AI cache между аккаунтами. Multi-account Gemini pool с автоматической ротацией при исчерпании квоты.
 
 **Решённые проблемы (v2.1–v2.4):**
 1. ~~`gemini-3-pro-preview` deprecation~~ → обновлён на `gemini-3.1-pro-preview`, старая модель в fallback chain
@@ -131,5 +142,9 @@
 4. ~~Авто-бид проверял stale bid_count~~ → fresh API вызов прямо перед размещением
 5. ~~Настройка "Crypto" сбивала с толку~~ → переименована в "Verified account"
 6. ~~Предупреждение о конкурентах создавало новое сообщение~~ → редактирование оригинального
+
+**Решённые проблемы (v2.9):**
+1. ~~3 проекта в сутки из-за квоты gemini-3.1-pro-preview~~ → Multi-account pool: 1 pro + 4 free аккаунтов, ротация на 429
+2. ~~Ввод точного числа в спиннере недоступен~~ → кнопка ✏️ открывает keyboard input mode
 
 **Следующая задача:** Аналитика win-rate по категориям/навыкам

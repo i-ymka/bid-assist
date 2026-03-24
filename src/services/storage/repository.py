@@ -369,7 +369,7 @@ class ProjectRepository:
                      title, summary, url, currency, bid_count, budget_min, budget_max,
                      client_country, avg_bid, int(notification_sent)),
                 )
-            logger.info(f"Bid record added for project {project_id}")
+            logger.debug(f"Bid record saved: project {project_id}")
             return True
         except sqlite3.Error as e:
             logger.error(f"Failed to record bid for project {project_id}: {e}")

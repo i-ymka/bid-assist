@@ -127,7 +127,7 @@ class FreelancerClient:
         if not self._user_id:
             raise FreelancerAPIError("Could not retrieve user ID from API response")
 
-        logger.info(f"Authenticated user ID: {self._user_id}")
+        logger.debug(f"Authenticated user ID: {self._user_id}")
         return self._user_id
 
     def get_remaining_bids(self) -> Optional[int]:

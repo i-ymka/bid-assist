@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-03-23 | [FEAT] v2.9 — Multi-account Gemini pool + Spinner keyboard input
+
+**Суть:**
+1. **Multi-account Gemini pool** — `_run_gemini_cli(prompt, primary_model, pool_model)` пробует аккаунты по порядку: pro → free1 → free2 → free3 → free4. При 429 QUOTA_EXHAUSTED — cooldown 1ч на `(home_dir, model)`. Если все исчерпаны — `_all_exhausted_flag = True`, `analysis_loop` посылает Telegram-уведомление и спит 30 мин.
+2. **Аккаунты изолированы через `HOME` env var** — каждый subprocess получает `env = {**os.environ, "HOME": account_home}`, где `account_home` = директория аккаунта (напр. `~/.gemini_accounts/pro`). Credentials в `{home}/.gemini/oauth_creds.json`.
+3. **Модели:** Pro: `gemini-3.1-pro-preview` (Call 1), `gemini-3.1-flash-lite-preview` (Call 2). Pool: `gemini-3-pro-preview` (Call 1), `gemini-3-flash-preview` (Call 2).
+4. **Конфиг:** `GEMINI_HOME_PRIMARY` (pro аккаунт), `GEMINI_HOME_POOL` (через запятую, free аккаунты), `GEMINI_POOL_MODEL`, `BID_POOL_MODEL` в .env.
+5. **`send_quota_exhausted_notification()`** в `notifier.py` — шлёт сообщение во все chat_ids.
+6. **Spinner ✏️** — в `/settings` числовые параметры теперь имеют кнопку ✏️. Нажатие запускает ConversationHandler (`WAITING_SPINNER = 2`): бот просит ввести число, `receive_spinner_value` валидирует, сохраняет, возвращает спиннер. `spincancel:` — отмена без сохранения.
+
+**Мотивация:**
+- `gemini-3.1-pro-preview` квота исчерпывалась после 3–4 анализов (~14ч reset). Бот буквально останавливался. 4 бесплатных аккаунта дают ~20+ дополнительных запросов в сутки.
+- Spinner с шагами ±1/±10 неудобен для больших чисел (например, budget_max = 5000 — нужно 500 нажатий). Keyboard input решает проблему за 1 действие.
+
+**Архитектурные решения:**
+- `HOME` вместо `GEMINI_HOME`: `GEMINI_HOME` не подтверждён в документации Gemini CLI, `HOME` — стандартный Unix способ изолировать домашние директории, работает надёжно.
+- Cooldown in-memory `dict[tuple[str, str], float]` — не в БД, сбрасывается при рестарте. Это ок: после рестарта quota могла сброситься сама.
+- `consume_exhaustion_flag()` — one-shot флаг, чтобы `analysis_loop` получил сигнал ровно один раз.
+- Pool-аккаунты используют модели без `.1` суффикса (gemini-3 vs gemini-3.1) — это реальные модели бесплатного тира (подтверждено через `gemini /stats` под free-аккаунтом).
+
+---
+
 ## 2026-03-22 | [FEAT] v2.8 — Двойная фильтрация + UX-правило одного сообщения
 
 **Суть:**
