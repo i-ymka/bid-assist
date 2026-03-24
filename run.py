@@ -257,12 +257,13 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 if repo.is_processed(project.id) or repo.is_in_queue(project.id):
                     continue
 
-                # Skip if another account already claimed or finished analysis
+                # If another account already decided SKIP — mark processed, don't queue
                 if shared_repo.is_claimed(project.id):
                     cached = shared_repo.get_result(project.id)
                     if cached and cached.get("verdict") == "SKIP":
                         repo.add_processed_project(project.id)
-                    continue
+                        continue
+                    # BID verdict or in_progress — each account queues and handles independently
 
                 # Skip if already bid on (from Freelancer API)
                 if project.id in already_bid_ids:
@@ -383,7 +384,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                     owner_display_name=project.owner.display_name or "",
                     is_preferred_only=project.is_preferred_only,
                 )
-                logger.info(f"[bold cyan]QUEUE[/bold cyan]  {project.title[:60]}  [{project.owner.country}]")
+                logger.info(f"[cyan]  {project.title[:60]}  [{project.owner.country}][/cyan]")
                 new_count += 1
 
             pending = repo.get_queue_count("pending")
@@ -575,7 +576,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                         continue
 
                 # We own the slot — run Call 1 exclusively
-                logger.info(f"[bold white]WORK[/bold white]  {project_data['title'][:60]}")
+                logger.info(f"[white]  ▸ {project_data['title'][:60]}[/white]")
                 repo.mark_queue_status(project_id, "analyzing")
                 try:
                     raw_feasibility = await loop.run_in_executor(
@@ -771,13 +772,12 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                                     )
                                 )
 
-                            logger.info(f"[bold blue]LIVE[/bold blue]  {project_data['title'][:55]}  ${result.amount}  (bids left: {remaining_bids})")
                         else:
                             # Check if error is about bid limit
                             error_lower = bid_result.message.lower()
                             if "preferred freelancer" in error_lower:
                                 # Project became preferred-only after being queued — silent skip
-                                logger.info(f"AUTO-BID SKIPPED project {project_id}: preferred freelancer only (was queued before filter caught it)")
+                                logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  (preferred-only)")
                             elif "used all" in error_lower or "all of your bids" in error_lower or ("bid" in error_lower and ("limit" in error_lower or "remain" in error_lower or "run out" in error_lower)):
                                 # Disable auto-bid
                                 repo.set_auto_bid(False)
@@ -796,11 +796,12 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                                     amount=result.amount,
                                     error=bid_result.message,
                                 )
-                                logger.error(f"AUTO-BID FAILED: {project_id} - {bid_result.message}")
+                                logger.error(f"FAIL  {project_data['title'][:55]}  — {bid_result.message}")
 
                     # Mark notification as sent in bid_history
                     if notif_sent:
                         repo.mark_notification_sent(project_id)
+                        logger.info(f"[bold green]SENT[/bold green]  {project_data['title'][:55]}  ${result.amount}  ({result.period}d)")
                 else:
                     # Manual mode: store pending bid and send notification with Place Bid button
                     repo.add_pending_bid(

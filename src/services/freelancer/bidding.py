@@ -104,11 +104,7 @@ class BiddingService:
             if response.get("status") == "success":
                 result_data = response.get("result", {})
                 bid_id = result_data.get("id")
-                # Log full response to find remaining bids field
-                logger.info(
-                    f"Bid placed successfully on project {bid.project_id}, "
-                    f"bid ID: {bid_id}, response keys: {list(result_data.keys())}"
-                )
+                logger.debug(f"Bid placed: #{bid_id}")
                 return BidResult(
                     success=True,
                     message="Bid placed successfully",
