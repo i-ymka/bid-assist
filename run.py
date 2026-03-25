@@ -177,10 +177,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Silence noisy third-party loggers
-for _noisy in ("httpx", "httpcore", "telegram", "telegram.ext.Updater", "hpack", "asyncio",
+for _noisy in ("httpx", "httpcore", "hpack", "asyncio",
                "apscheduler", "apscheduler.scheduler", "apscheduler.executors.default"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
-logging.getLogger("telegram.ext.Updater").setLevel(logging.CRITICAL)
+for _tg in ("telegram", "telegram.ext", "telegram.ext.Updater", "telegram._bot"):
+    logging.getLogger(_tg).setLevel(logging.CRITICAL)
 logging.getLogger("apscheduler").setLevel(logging.CRITICAL)
 
 # Global flag for graceful shutdown
@@ -414,7 +415,10 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 await asyncio.sleep(1)
 
         except Exception as e:
-            logger.error(f"Polling error: {e}")
+            if "Timed out" in str(e):
+                logger.debug(f"Polling: Telegram timeout, retrying...")
+            else:
+                logger.error(f"Polling error: {e}")
             await asyncio.sleep(30)
 
 
