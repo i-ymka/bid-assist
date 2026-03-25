@@ -575,39 +575,40 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                         repo.remove_from_queue(project_id)
                         repo.add_processed_project(project_id)
                         continue
-
-                # We own the slot — run Call 1 exclusively
-                logger.info(f"[white]  ▸ {project_data['title'][:60]}[/white]")
-                repo.mark_queue_status(project_id, "analyzing")
-                try:
-                    raw_feasibility = await loop.run_in_executor(
-                        None, analyze_feasibility,
-                        project_id, project_data["title"], project_data["description"],
-                        budget_str, avg_bid_usd, bid_count,
-                    )
-                except Exception:
-                    shared_repo.release_claim(project_id)
-                    raise
-                if raw_feasibility:
-                    shared_repo.store_result(
-                        project_id,
-                        raw_feasibility["verdict"],
-                        raw_feasibility.get("days", 1),
-                        raw_feasibility.get("summary", ""),
-                    )
-                    cached_feasibility = raw_feasibility
+                    # Got result from wait — fall through to use cached_feasibility below
                 else:
-                    # Call 1 failed — release slot so other accounts can retry later, skip Call 2
-                    shared_repo.release_claim(project_id)
-                    continue
-            else:
-                logger.debug(f"Project {project_id}: using cached Call 1 result (verdict={cached_feasibility['verdict']})")
-                # If another account already decided SKIP, mark processed locally so we don't re-queue
-                if cached_feasibility.get("verdict") == "SKIP":
-                    repo.remove_from_queue(project_id)
-                    repo.add_processed_project(project_id)
-                    continue
-                repo.mark_queue_status(project_id, "analyzing")
+                    # We own the slot — run Call 1 exclusively
+                    logger.info(f"[white]  ▸ {project_data['title'][:60]}[/white]")
+                    repo.mark_queue_status(project_id, "analyzing")
+                    try:
+                        raw_feasibility = await loop.run_in_executor(
+                            None, analyze_feasibility,
+                            project_id, project_data["title"], project_data["description"],
+                            budget_str, avg_bid_usd, bid_count,
+                        )
+                    except Exception:
+                        shared_repo.release_claim(project_id)
+                        raise
+                    if raw_feasibility:
+                        shared_repo.store_result(
+                            project_id,
+                            raw_feasibility["verdict"],
+                            raw_feasibility.get("days", 1),
+                            raw_feasibility.get("summary", ""),
+                        )
+                        cached_feasibility = raw_feasibility
+                    else:
+                        # Call 1 failed — release slot so other accounts can retry later, skip Call 2
+                        shared_repo.release_claim(project_id)
+                        continue
+
+            # Use cached_feasibility (from cache hit, wait-loop, or our own Call 1)
+            logger.debug(f"Project {project_id}: Call 1 result verdict={cached_feasibility['verdict']}")
+            if cached_feasibility.get("verdict") == "SKIP":
+                repo.remove_from_queue(project_id)
+                repo.add_processed_project(project_id)
+                continue
+            repo.mark_queue_status(project_id, "analyzing")
 
             owner_name = ""  # Freelancer API does not expose owner display name to freelancers
 
