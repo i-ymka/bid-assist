@@ -191,17 +191,17 @@ def _run_gemini_cli(
                 clean_msg = _extract_clean_error(result.stderr)
 
                 if error_type == "quota":
-                    logger.debug(f"{label}/{_short_model(model)}: quota exhausted — cooldown 1h")
+                    logger.info(f"{label}/{_short_model(model)}: [bold red]quota exhausted[/bold red] — cooldown 1h")
                     _cooldowns[(home, model)] = time.time() + 3600  # 1h cooldown
                     continue
                 elif error_type == "overload":
-                    logger.debug(f"{label}/{_short_model(model)}: server overload — trying next")
+                    logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — trying next")
                     continue
                 elif error_type == "cancelled":
                     logger.debug("Gemini CLI interrupted")
                     return None
                 else:
-                    logger.debug(f"{label}/{_short_model(model)}: {clean_msg} — trying next")
+                    logger.info(f"{label}/{_short_model(model)}: [bold yellow]{clean_msg}[/bold yellow] — trying next")
                     continue
 
             _cooldowns.pop((home, model), None)
