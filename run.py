@@ -552,8 +552,9 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
             _min_daily_rate = repo.get_min_daily_rate()
             _bid_adjustment = repo.get_bid_adjustment()
             _raw = avg_bid_usd if avg_bid_usd > 0 else (budget_min_usd + budget_max_usd) / 2
-            if _raw > 0:
-                _target_est = _raw * (1 + _bid_adjustment / 100)
+            _multiplier = 1 + _bid_adjustment / 100
+            if _raw > 0 and _multiplier > 0:
+                _target_est = _raw * _multiplier
                 if _target_est < _min_daily_rate:
                     logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  (${_target_est:.0f} < ${_min_daily_rate}/d)")
                     repo.remove_from_queue(project_id)
@@ -607,8 +608,10 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                         )
                         cached_feasibility = raw_feasibility
                     else:
-                        # Call 1 failed — release slot so other accounts can retry later, skip Call 2
+                        # Call 1 failed — release slot, remove from queue
                         shared_repo.release_claim(project_id)
+                        repo.remove_from_queue(project_id)
+                        repo.add_processed_project(project_id)
                         continue
 
             # Use cached_feasibility (from cache hit, wait-loop, or our own Call 1)
@@ -651,7 +654,6 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                     await notifier.send_quota_exhausted_notification()
                     # Reset project to pending so we retry it after the sleep — do NOT re-queue from poll
                     repo.mark_queue_status(project_id, "pending")
-                    shared_repo.release_claim(project_id)
                     await asyncio.sleep(1800)
                 else:
                     # Transient failure — mark processed to avoid re-queue loop

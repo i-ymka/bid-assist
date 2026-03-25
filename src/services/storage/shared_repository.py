@@ -7,6 +7,7 @@ when both accounts discover the same project.
 
 import sqlite3
 import logging
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +20,7 @@ class SharedAnalysisRepository:
     def __init__(self, db_path: str):
         self.db_path = str(db_path)
         self._conn: Optional[sqlite3.Connection] = None
+        self._lock = threading.Lock()
         self._connect()
         self._init_db()
 
@@ -44,48 +46,36 @@ class SharedAnalysisRepository:
             """)
 
     # ------------------------------------------------------------------
-    # Public interface
+    # Public interface — all methods are thread-safe via _lock
     # ------------------------------------------------------------------
 
     def try_claim(self, project_id: int) -> bool:
-        """Atomically claim the right to run Call 1 for this project.
-
-        Returns True  → we claimed it, run Call 1 and call store_result().
-        Returns False → another process already claimed or finished it;
-                        use get_result() or defer to next cycle.
-        """
+        """Atomically claim the right to run Call 1 for this project."""
         try:
-            with self._conn:
+            with self._lock, self._conn:
                 cursor = self._conn.execute(
                     "INSERT OR IGNORE INTO shared_analysis (project_id, status) VALUES (?, 'in_progress')",
                     (project_id,),
                 )
-                if cursor.rowcount == 1:
-                    # We just inserted — we own this analysis slot
-                    return True
-                # Row already existed — someone else claimed or finished it
-                return False
+                return cursor.rowcount == 1
         except sqlite3.Error as e:
             logger.error(f"shared_analysis try_claim({project_id}): {e}")
             return False
 
     def get_result(self, project_id: int) -> Optional[dict]:
-        """Return cached Call 1 result if available and fresh (< 24h).
-
-        Returns dict with keys: verdict, days, summary
-        Returns None if not cached, in_progress, or older than 24h.
-        """
+        """Return cached Call 1 result if available and fresh (< 24h)."""
         try:
-            row = self._conn.execute(
-                """
-                SELECT verdict, days, summary, status
-                FROM shared_analysis
-                WHERE project_id = ?
-                  AND status IN ('done', 'skip')
-                  AND created_at > datetime('now', '-24 hours')
-                """,
-                (project_id,),
-            ).fetchone()
+            with self._lock:
+                row = self._conn.execute(
+                    """
+                    SELECT verdict, days, summary, status
+                    FROM shared_analysis
+                    WHERE project_id = ?
+                      AND status IN ('done', 'skip')
+                      AND created_at > datetime('now', '-24 hours')
+                    """,
+                    (project_id,),
+                ).fetchone()
             if row:
                 return {"verdict": row["verdict"], "days": row["days"], "summary": row["summary"]}
             return None
@@ -97,7 +87,7 @@ class SharedAnalysisRepository:
         """Store Call 1 result and mark slot as done/skip."""
         status = "skip" if verdict == "SKIP" else "done"
         try:
-            with self._conn:
+            with self._lock, self._conn:
                 self._conn.execute(
                     """
                     UPDATE shared_analysis
@@ -113,21 +103,19 @@ class SharedAnalysisRepository:
     def is_claimed(self, project_id: int) -> bool:
         """Return True if project is already in shared_analysis (in_progress or finished)."""
         try:
-            row = self._conn.execute(
-                "SELECT 1 FROM shared_analysis WHERE project_id = ?",
-                (project_id,),
-            ).fetchone()
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT 1 FROM shared_analysis WHERE project_id = ?",
+                    (project_id,),
+                ).fetchone()
             return row is not None
         except sqlite3.Error:
             return False
 
     def release_claim(self, project_id: int):
-        """Delete an in_progress slot so other accounts can retry later.
-
-        Called when Call 1 fails — we own the slot but have no result to store.
-        """
+        """Delete an in_progress slot so other accounts can retry later."""
         try:
-            with self._conn:
+            with self._lock, self._conn:
                 self._conn.execute(
                     "DELETE FROM shared_analysis WHERE project_id = ? AND status = 'in_progress'",
                     (project_id,),
@@ -136,9 +124,9 @@ class SharedAnalysisRepository:
             logger.error(f"shared_analysis release_claim({project_id}): {e}")
 
     def release_stale_claims(self, max_age_minutes: int = 30) -> int:
-        """Release in_progress claims older than max_age_minutes (e.g. left from a crashed run)."""
+        """Release in_progress claims older than max_age_minutes."""
         try:
-            with self._conn:
+            with self._lock, self._conn:
                 cursor = self._conn.execute(
                     "DELETE FROM shared_analysis WHERE status = 'in_progress' AND created_at < datetime('now', ? || ' minutes')",
                     (f"-{max_age_minutes}",),
@@ -152,12 +140,9 @@ class SharedAnalysisRepository:
             return 0
 
     def cleanup_stale(self, max_age_hours: float = 24) -> int:
-        """Remove stale in_progress entries and expired cache rows.
-
-        Called by cleanup_loop. Same pattern as ProjectRepository.cleanup_old_queue_items().
-        """
+        """Remove stale in_progress entries and expired cache rows."""
         try:
-            with self._conn:
+            with self._lock, self._conn:
                 cursor = self._conn.execute(
                     "DELETE FROM shared_analysis WHERE created_at < datetime('now', ? || ' hours')",
                     (f"-{max_age_hours}",),

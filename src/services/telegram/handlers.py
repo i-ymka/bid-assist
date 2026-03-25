@@ -1424,6 +1424,8 @@ async def handle_spinner_callback(update: Update, context: ContextTypes.DEFAULT_
 
     current = _spinner_get(repo, key)
     new_value = max(min_val, min(max_val, current + delta))
+    if key != "proj_age":
+        new_value = int(new_value)
     if new_value != current:
         _spinner_set(repo, key, new_value)
 
