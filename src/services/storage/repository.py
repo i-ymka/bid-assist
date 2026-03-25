@@ -1321,6 +1321,33 @@ class ProjectRepository:
             logger.error(f"Failed to set min_daily_rate: {e}")
             return False
 
+    def get_max_project_age(self) -> float:
+        """Get max project age in hours from runtime settings."""
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'max_project_age'"
+            )
+            row = cursor.fetchone()
+            return float(row[0]) if row else 2.0
+        except (sqlite3.Error, ValueError) as e:
+            logger.error(f"Failed to get max_project_age: {e}")
+            return 2.0
+
+    def set_max_project_age(self, hours: float) -> bool:
+        """Set max project age in hours in runtime settings."""
+        try:
+            with self._conn:
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO runtime_settings (key, value, updated_at)
+                       VALUES ('max_project_age', ?, CURRENT_TIMESTAMP)""",
+                    (str(hours),),
+                )
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to set max_project_age: {e}")
+            return False
+
     def is_verified(self) -> bool:
         """Check if account is verified (can bid on verification-required projects)."""
         try:

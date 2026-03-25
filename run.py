@@ -309,7 +309,7 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 # Apply project age filter
                 if project.time_submitted:
                     age_hours = (datetime.utcnow() - project.time_submitted).total_seconds() / 3600
-                    if age_hours > settings.max_project_age_hours:
+                    if age_hours > repo.get_max_project_age():
                         logger.debug(f"FILTERED {project.id}: too old ({age_hours:.1f}h)")
                         repo.add_processed_project(project.id)
                         filtered_count += 1
@@ -437,8 +437,9 @@ def _recheck_queue_filters(project_data: dict, repo: ProjectRepository) -> "Opti
                     time_submitted = None
         if time_submitted:
             age_hours = (datetime.utcnow() - time_submitted).total_seconds() / 3600
-            if age_hours > settings.max_project_age_hours:
-                return f"Too old ({age_hours:.1f}h > {settings.max_project_age_hours}h)"
+            max_age = repo.get_max_project_age()
+            if age_hours > max_age:
+                return f"Too old ({age_hours:.1f}h > {max_age}h)"
 
     # Budget filter — user may have changed budget range
     budget_max = project_data.get("budget_max", 0)

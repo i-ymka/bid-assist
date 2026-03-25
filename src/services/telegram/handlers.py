@@ -1210,6 +1210,7 @@ _SPINNER_CONFIG = {
     "poll":       ("Poll Interval",   "s",       30, 3600, 30,  60),
     "budget_min": ("Min Budget",      "$",       30, 10000, 50, 200),
     "budget_max": ("Max Budget",      "$",       30, 10000, 50, 200),
+    "proj_age":   ("Max Project Age", "h",      0.5, 12,   0.5,  1),
 }
 
 
@@ -1221,6 +1222,7 @@ def _spinner_get(repo: "ProjectRepository", key: str) -> int:
     if key == "poll":       return repo.get_poll_interval()
     if key == "budget_min": return state["min_budget"]
     if key == "budget_max": return state["max_budget"]
+    if key == "proj_age":  return repo.get_max_project_age()
     return 0
 
 
@@ -1236,11 +1238,12 @@ def _spinner_set(repo: "ProjectRepository", key: str, value: int) -> None:
     elif key == "budget_max":
         state["max_budget"] = value
         repo.set_budget_range(state["min_budget"], value)
+    elif key == "proj_age": repo.set_max_project_age(value)
 
 
-def _build_spinner_message(key: str, value: int) -> str:
+def _build_spinner_message(key: str, value) -> str:
     label, unit, min_val, max_val, _, _ = _SPINNER_CONFIG[key]
-    sign = "+" if value > 0 else ""
+    sign = "+" if key == "bid_adj" and value > 0 else ""
     return (
         f"⚙️ <b>{label}</b>\n\n"
         f"Value: <b>{sign}{value}{unit}</b>\n\n"
@@ -1248,9 +1251,9 @@ def _build_spinner_message(key: str, value: int) -> str:
     )
 
 
-def _build_spinner_keyboard(key: str, value: int) -> InlineKeyboardMarkup:
+def _build_spinner_keyboard(key: str, value) -> InlineKeyboardMarkup:
     _, unit, min_val, max_val, step_s, step_b = _SPINNER_CONFIG[key]
-    sign = "+" if value > 0 else ""
+    sign = "+" if key == "bid_adj" and value > 0 else ""
     display = f"{sign}{value}{unit}"
     return InlineKeyboardMarkup([
         [
@@ -1287,6 +1290,7 @@ def _build_settings_message(repo: ProjectRepository) -> str:
         f"<b>Filters:</b>\n"
         f"• Budget: ${state['min_budget']} – ${state['max_budget']}\n"
         f"• Poll: every {poll_min}m ({poll_sec}s)\n"
+        f"• Max project age: {repo.get_max_project_age():.1f}h\n"
         f"• Languages: {', '.join(settings.allowed_languages) if settings.allowed_languages else 'all'}\n"
         f"• Blocked currencies: {', '.join(settings.blocked_currencies) if settings.blocked_currencies else 'none'}\n\n"
         f"<b>Show projects:</b>\n"
@@ -1320,6 +1324,7 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"💰 Min: ${state['min_budget']}", callback_data="settings:budget_min"),
             InlineKeyboardButton(f"💰 Max: ${state['max_budget']}", callback_data="settings:budget_max"),
             InlineKeyboardButton(f"⏱ Poll: {poll_display}", callback_data="settings:poll"),
+            InlineKeyboardButton(f"🕐 Age: {repo.get_max_project_age():.1f}h", callback_data="settings:proj_age"),
         ],
         [
             InlineKeyboardButton(f"Verified: {verified_yn}", callback_data="settings:verified"),
@@ -1414,7 +1419,7 @@ async def handle_spinner_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     key = parts[1]
-    delta = int(parts[2])
+    delta = float(parts[2])
     _, _, min_val, max_val, _, _ = _SPINNER_CONFIG[key]
 
     current = _spinner_get(repo, key)
@@ -1470,9 +1475,11 @@ async def receive_spinner_value(update: Update, context: ContextTypes.DEFAULT_TY
         pass
 
     try:
-        value = int(update.message.text.strip())
+        value = float(update.message.text.strip())
+        if value == int(value) and key != "proj_age":
+            value = int(value)
     except ValueError:
-        await update.message.reply_text(f"❌ Enter a whole number ({min_val}…{max_val})", parse_mode="HTML")
+        await update.message.reply_text(f"❌ Enter a number ({min_val}…{max_val})", parse_mode="HTML")
         return WAITING_SPINNER
 
     if not (min_val <= value <= max_val):
