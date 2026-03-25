@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -233,13 +234,17 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
             # Use skill_ids from .env
             skill_ids = settings.skill_ids
 
-            # Fetch projects already bid on from Freelancer API
-            already_bid_ids = bidding_service.get_my_bidded_project_ids(limit=200)
+            # Fetch projects already bid on — cache for 10 min to save API calls
+            now_ts = time.time()
+            if not hasattr(polling_loop, "_bid_cache") or now_ts - polling_loop._bid_cache_ts > 600:
+                polling_loop._bid_cache = bidding_service.get_my_bidded_project_ids(limit=200)
+                polling_loop._bid_cache_ts = now_ts
+            already_bid_ids = polling_loop._bid_cache
 
             # Fetch projects
             projects = project_service.get_active_projects(
                 skill_ids=skill_ids,
-                min_budget=50,  # Default: $50 (actual filter in BudgetFilter uses runtime settings)
+                min_budget=budget_min,  # Uses runtime setting from DB
             )
 
             # Initialize filters (budget range is read from DB each cycle — user can change it live)
@@ -649,8 +654,9 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                     shared_repo.release_claim(project_id)
                     await asyncio.sleep(1800)
                 else:
-                    # Transient failure — remove so next poll cycle can re-queue and retry
+                    # Transient failure — mark processed to avoid re-queue loop
                     repo.remove_from_queue(project_id)
+                    repo.add_processed_project(project_id)
                 continue
 
             # Convert code-calculated USD amount to project currency
@@ -673,15 +679,15 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                         None, project_service.get_project_details, project_id
                     )
                     if not fresh_project:
-                        logger.info(f"AUTO-BID SKIPPED project {project_id}: project no longer available (deleted or closed)")
+                        logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  (project closed)")
                         continue
                     fresh_bid_count = fresh_project.bid_stats.bid_count
                     if fresh_bid_count > max_bids_now:
-                        logger.info(f"AUTO-BID SKIPPED project {project_id}: {fresh_bid_count} bids now > limit {max_bids_now}")
+                        logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  ({fresh_bid_count} bids > limit {max_bids_now})")
                         continue
 
                     # Auto-bid: place bid immediately
-                    logger.info(f"AUTO-BID: Placing bid on {project_id} - ${result.amount}")
+                    logger.debug(f"AUTO-BID: placing bid on {project_id} - ${result.amount}")
                     bidding_service = BiddingService()
                     bid = Bid(
                         project_id=project_id,

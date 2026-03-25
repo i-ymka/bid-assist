@@ -79,10 +79,7 @@ class BiddingService:
         Returns:
             BidResult indicating success or failure.
         """
-        logger.info(
-            f"Placing bid on project {bid.project_id}: "
-            f"${bid.amount} for {bid.period} days"
-        )
+        logger.debug(f"Placing bid: ${bid.amount} for {bid.period}d")
 
         try:
             bidder_id = self._get_bidder_id()

@@ -196,6 +196,7 @@ def _run_gemini_cli(
                     continue
                 elif error_type == "overload":
                     logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — trying next")
+                    _cooldowns[(home, model)] = time.time() + 300  # 5min cooldown
                     continue
                 elif error_type == "cancelled":
                     logger.debug("Gemini CLI interrupted")
