@@ -241,14 +241,14 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                 polling_loop._bid_cache_ts = now_ts
             already_bid_ids = polling_loop._bid_cache
 
+            # Initialize filters (budget range is read from DB each cycle — user can change it live)
+            budget_min, budget_max = repo.get_budget_range()
+
             # Fetch projects
             projects = project_service.get_active_projects(
                 skill_ids=skill_ids,
-                min_budget=budget_min,  # Uses runtime setting from DB
+                min_budget=budget_min,
             )
-
-            # Initialize filters (budget range is read from DB each cycle — user can change it live)
-            budget_min, budget_max = repo.get_budget_range()
             logger.debug(f"Budget filter: ${budget_min}-${budget_max}")
             budget_filter = BudgetFilter(min_budget=budget_min, max_budget=budget_max)
             blacklist_filter = BlacklistFilter()
