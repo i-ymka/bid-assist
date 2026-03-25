@@ -1048,6 +1048,10 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Prevent macOS sleep (replaces external caffeinate wrapper)
+    import subprocess as _sp
+    _caffeinate = _sp.Popen(["caffeinate", "-dimsu", "-w", str(os.getpid())])
+
     # Run the main loop
     try:
         asyncio.run(main())
