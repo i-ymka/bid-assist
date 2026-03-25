@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     # Gemini CLI models
     gemini_model: str = Field("gemini-3.1-pro-preview", alias="GEMINI_MODEL")      # Call 1: primary (pro account)
     bid_model: str = Field("gemini-3.1-flash-lite-preview", alias="BID_MODEL")     # Call 2: primary (pro account)
-    gemini_pool_model: str = Field("gemini-3-pro-preview", alias="GEMINI_POOL_MODEL")    # Call 1: pool (free accounts)
-    bid_pool_model: str = Field("gemini-3-flash-preview", alias="BID_POOL_MODEL")       # Call 2: pool (free accounts)
+    gemini_pool_model: str = Field("gemini-2.5-flash", alias="GEMINI_POOL_MODEL")        # Call 1: pool (free accounts) — Pro models blocked on free tier since 2026-03-25
+    bid_pool_model: str = Field("gemini-3.1-flash-lite-preview", alias="BID_POOL_MODEL") # Call 2: pool (free accounts)
 
     # Gemini account pool (multi-account quota rotation)
     gemini_home_primary: str = Field("", alias="GEMINI_HOME_PRIMARY")   # path for pro account home dir (empty = default ~/.gemini)
