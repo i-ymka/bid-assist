@@ -317,6 +317,8 @@ def _calculate_amount(
     budget_max_usd: float,
     min_daily_rate: int = 100,
     bid_adjustment: int = -10,
+    tier2_pct: int = 65,
+    tier3_pct: int = 50,
 ) -> Optional[float]:
     """Deterministic pricing formula.
 
@@ -327,12 +329,20 @@ def _calculate_amount(
         budget_max_usd: Client's maximum budget in USD
         min_daily_rate: Minimum USD per day (default 100)
         bid_adjustment: % above/below market (-10 = 10% below, 0 = at market, +10 = 10% above)
+        tier2_pct: % of min_daily_rate applied for 4-7 day projects (default 65)
+        tier3_pct: % of min_daily_rate applied for 8+ day projects (default 50)
 
     Returns:
         Bid amount in USD, rounded to nearest $10.
         Returns None if market price is below our minimum daily rate (→ SKIP).
     """
-    floor = days * min_daily_rate
+    if days <= 3:
+        effective_rate = min_daily_rate
+    elif days <= 7:
+        effective_rate = min_daily_rate * tier2_pct / 100
+    else:
+        effective_rate = min_daily_rate * tier3_pct / 100
+    floor = days * effective_rate
     multiplier = 1 + bid_adjustment / 100
 
     if avg_bid_usd and avg_bid_usd > 0:
@@ -343,7 +353,7 @@ def _calculate_amount(
 
     if target < floor:
         logger.info(
-            f"[bold yellow]NOPE[/bold yellow]  ${target:.0f} < floor ${floor:.0f}  ({days}d × ${min_daily_rate}/d)"
+            f"[bold yellow]NOPE[/bold yellow]  ${target:.0f} < floor ${floor:.0f}  ({days}d × ${effective_rate:.0f}/d)"
         )
         return None  # signal to caller: skip this project
 
@@ -499,6 +509,8 @@ def analyze_project(
     owner_name: str = "",
     bid_adjustment: int = -10,
     feasibility: Optional[dict] = None,
+    tier2_pct: int = 65,
+    tier3_pct: int = 50,
 ) -> Optional[AnalysisResult]:
     """Orchestrate the two-call analysis pipeline.
 
@@ -532,7 +544,7 @@ def analyze_project(
 
     # --- Pricing (deterministic) ---
     days = max(feasibility["days"], 1)
-    amount = _calculate_amount(days, avg_bid_usd, budget_min_usd, budget_max_usd, min_daily_rate, bid_adjustment)
+    amount = _calculate_amount(days, avg_bid_usd, budget_min_usd, budget_max_usd, min_daily_rate, bid_adjustment, tier2_pct, tier3_pct)
     if amount is None:
         return AnalysisResult(
             verdict="SKIP",
@@ -595,7 +607,7 @@ def force_bid_analysis(
         logger.warning(f"Force bid: Call 1 failed for {project_id}, using default period={days}")
 
     # Pricing — for forced bids, use floor if market is below minimum
-    amount = _calculate_amount(days, avg_bid_usd, budget_min_usd, budget_max_usd, min_daily_rate, bid_adjustment)
+    amount = _calculate_amount(days, avg_bid_usd, budget_min_usd, budget_max_usd, min_daily_rate, bid_adjustment, tier2_pct, tier3_pct)
     if amount is None:
         amount = round((days * min_daily_rate) / 10) * 10
         logger.info(f"Force bid: market below floor, using floor ${amount:.0f}")

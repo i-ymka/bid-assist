@@ -1204,13 +1204,15 @@ async def handle_bidstats_callback(update: Update, context: ContextTypes.DEFAULT
 
 # Spinner config: key → (label, unit, min, max, step_small, step_big)
 _SPINNER_CONFIG = {
-    "bid_adj":    ("Bid Adjustment",  "%",      -50, 50,    5,  10),
-    "max_bids":   ("Max Competitors", " bids",    1, 999,   5,  25),
-    "daily_rate": ("Min Daily Rate",  "$/day",   25, 500,  25,  50),
-    "poll":       ("Poll Interval",   "s",       30, 3600, 30,  60),
-    "budget_min": ("Min Budget",      "$",       30, 10000, 50, 200),
-    "budget_max": ("Max Budget",      "$",       30, 10000, 50, 200),
-    "proj_age":   ("Max Project Age", "h",      0.5, 12,   0.5,  1),
+    "bid_adj":    ("Bid Adjustment",        "%",      -50, 50,    5,  10),
+    "max_bids":   ("Max Competitors",       " bids",    1, 999,   5,  25),
+    "daily_rate": ("Min Daily Rate",        "$/day",   25, 500,  25,  50),
+    "poll":       ("Poll Interval",         "s",       30, 3600, 30,  60),
+    "budget_min": ("Min Budget",            "$",       30, 10000, 50, 200),
+    "budget_max": ("Max Budget",            "$",       30, 10000, 50, 200),
+    "proj_age":   ("Max Project Age",       "h",      0.5, 12,   0.5,  1),
+    "tier2_pct":  ("Rate: 4-7 day projects", "%",      30, 100,   5,  10),
+    "tier3_pct":  ("Rate: 8+ day projects",  "%",      30, 100,   5,  10),
 }
 
 
@@ -1223,6 +1225,8 @@ def _spinner_get(repo: "ProjectRepository", key: str) -> int:
     if key == "budget_min": return state["min_budget"]
     if key == "budget_max": return state["max_budget"]
     if key == "proj_age":  return repo.get_max_project_age()
+    if key == "tier2_pct": return repo.get_rate_tier2_pct()
+    if key == "tier3_pct": return repo.get_rate_tier3_pct()
     return 0
 
 
@@ -1238,7 +1242,9 @@ def _spinner_set(repo: "ProjectRepository", key: str, value: int) -> None:
     elif key == "budget_max":
         state["max_budget"] = value
         repo.set_budget_range(state["min_budget"], value)
-    elif key == "proj_age": repo.set_max_project_age(value)
+    elif key == "proj_age":   repo.set_max_project_age(value)
+    elif key == "tier2_pct":  repo.set_rate_tier2_pct(int(value))
+    elif key == "tier3_pct":  repo.set_rate_tier3_pct(int(value))
 
 
 def _build_spinner_message(key: str, value) -> str:
@@ -1255,7 +1261,7 @@ def _build_spinner_keyboard(key: str, value) -> InlineKeyboardMarkup:
     _, unit, min_val, max_val, step_s, step_b = _SPINNER_CONFIG[key]
     sign = "+" if key == "bid_adj" and value > 0 else ""
     display = f"{sign}{value}{unit}"
-    return InlineKeyboardMarkup([
+    rows = [
         [
             InlineKeyboardButton(f"−{step_b}", callback_data=f"spinner:{key}:-{step_b}"),
             InlineKeyboardButton(f"−{step_s}", callback_data=f"spinner:{key}:-{step_s}"),
@@ -1263,11 +1269,40 @@ def _build_spinner_keyboard(key: str, value) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"+{step_s}", callback_data=f"spinner:{key}:+{step_s}"),
             InlineKeyboardButton(f"+{step_b}", callback_data=f"spinner:{key}:+{step_b}"),
         ],
-        [
+    ]
+    if key in ("tier2_pct", "tier3_pct"):
+        rows.append([
+            InlineKeyboardButton(display, callback_data=f"spinner:{key}:0"),
+            InlineKeyboardButton("← Назад", callback_data="settings:coeff_menu"),
+        ])
+    else:
+        rows.append([
             InlineKeyboardButton(display, callback_data=f"spinner:{key}:0"),
             InlineKeyboardButton("✅ Done", callback_data="spinner:done"),
-        ],
+        ])
+    if key == "daily_rate":
+        rows.append([InlineKeyboardButton("⚙️ Коэффициенты по длительности", callback_data="settings:coeff_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_coeff_menu(repo: ProjectRepository) -> tuple[str, InlineKeyboardMarkup]:
+    """Build the coefficients sub-menu message and keyboard."""
+    mdr = repo.get_min_daily_rate()
+    t2 = repo.get_rate_tier2_pct()
+    t3 = repo.get_rate_tier3_pct()
+    text = (
+        f"⚙️ <b>Коэффициенты по длительности</b>\n\n"
+        f"Базовая ставка: <b>${mdr}/день</b>\n\n"
+        f"• 1-3 дня:  100% = <b>${mdr}/д</b>\n"
+        f"• 4-7 дней: {t2}% = <b>${int(mdr * t2 / 100)}/д</b>\n"
+        f"• 8+ дней:  {t3}% = <b>${int(mdr * t3 / 100)}/д</b>"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"4-7 дней: {t2}%", callback_data="settings:tier2_pct")],
+        [InlineKeyboardButton(f"8+ дней: {t3}%",  callback_data="settings:tier3_pct")],
+        [InlineKeyboardButton("← Назад к ставке", callback_data="settings:daily_rate")],
     ])
+    return text, keyboard
 
 
 def _build_settings_message(repo: ProjectRepository) -> str:
@@ -1283,6 +1318,10 @@ def _build_settings_message(repo: ProjectRepository) -> str:
     skipped_status = "✅ Yes" if repo.get_receive_skipped() else "❌ No"
 
     min_daily_rate = repo.get_min_daily_rate()
+    tier2_pct = repo.get_rate_tier2_pct()
+    tier3_pct = repo.get_rate_tier3_pct()
+    tier2_abs = int(min_daily_rate * tier2_pct / 100)
+    tier3_abs = int(min_daily_rate * tier3_pct / 100)
     bid_adjustment = repo.get_bid_adjustment()
     adj_sign = "+" if bid_adjustment > 0 else ""
     return (
@@ -1298,7 +1337,7 @@ def _build_settings_message(repo: ProjectRepository) -> str:
         f"• Preferred-only: {preferred_status}\n\n"
         f"<b>Bidding:</b>\n"
         f"• Auto-bid: {auto_bid_status}\n"
-        f"• Min daily rate: ${min_daily_rate}/day\n"
+        f"• Min daily rate: ${min_daily_rate}/day  (4-7d: ${tier2_abs} · 8+d: ${tier3_abs})\n"
         f"• Bid adjustment: {adj_sign}{bid_adjustment}% from market\n\n"
         f"<b>Notifications:</b>\n"
         f"• Show skipped: {skipped_status}"
@@ -1384,6 +1423,10 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         message = _build_settings_message(repo)
         keyboard = _get_settings_keyboard(repo)
         await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
+
+    elif action == "coeff_menu":
+        text, keyboard = _build_coeff_menu(repo)
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
 
     elif action in _SPINNER_CONFIG:
         value = _spinner_get(repo, action)

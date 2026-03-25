@@ -177,6 +177,14 @@ class ProjectRepository:
                     INSERT OR IGNORE INTO runtime_settings (key, value)
                     VALUES ('bid_adjustment', '-10')
                 """)
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO runtime_settings (key, value)
+                    VALUES ('rate_tier2_pct', '65')
+                """)
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO runtime_settings (key, value)
+                    VALUES ('rate_tier3_pct', '50')
+                """)
 
                 # User settings table (multi-user support)
                 self._conn.execute("""
@@ -1346,6 +1354,60 @@ class ProjectRepository:
             return True
         except sqlite3.Error as e:
             logger.error(f"Failed to set max_project_age: {e}")
+            return False
+
+    def get_rate_tier2_pct(self) -> int:
+        """Get daily rate multiplier (%) for 4-7 day projects (default 65%)."""
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'rate_tier2_pct'"
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row else 65
+        except (sqlite3.Error, ValueError) as e:
+            logger.error(f"Failed to get rate_tier2_pct: {e}")
+            return 65
+
+    def set_rate_tier2_pct(self, pct: int) -> bool:
+        """Set daily rate multiplier (%) for 4-7 day projects."""
+        try:
+            with self._conn:
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO runtime_settings (key, value, updated_at)
+                       VALUES ('rate_tier2_pct', ?, CURRENT_TIMESTAMP)""",
+                    (str(pct),),
+                )
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to set rate_tier2_pct: {e}")
+            return False
+
+    def get_rate_tier3_pct(self) -> int:
+        """Get daily rate multiplier (%) for 8+ day projects (default 50%)."""
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'rate_tier3_pct'"
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row else 50
+        except (sqlite3.Error, ValueError) as e:
+            logger.error(f"Failed to get rate_tier3_pct: {e}")
+            return 50
+
+    def set_rate_tier3_pct(self, pct: int) -> bool:
+        """Set daily rate multiplier (%) for 8+ day projects."""
+        try:
+            with self._conn:
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO runtime_settings (key, value, updated_at)
+                       VALUES ('rate_tier3_pct', ?, CURRENT_TIMESTAMP)""",
+                    (str(pct),),
+                )
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to set rate_tier3_pct: {e}")
             return False
 
     def is_verified(self) -> bool:

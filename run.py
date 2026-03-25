@@ -631,6 +631,8 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
             # Run Gemini analysis (Call 2 always per-account; Call 1 skipped if cached)
             min_daily_rate = repo.get_min_daily_rate()
             bid_adjustment = repo.get_bid_adjustment()
+            tier2_pct = repo.get_rate_tier2_pct()
+            tier3_pct = repo.get_rate_tier3_pct()
             result = await loop.run_in_executor(
                 None,
                 partial(
@@ -647,6 +649,8 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                     owner_name,
                     bid_adjustment,
                     cached_feasibility,  # None → analyze_project runs Call 1 itself (fallback)
+                    tier2_pct,
+                    tier3_pct,
                 ),
             )
 
