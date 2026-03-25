@@ -195,18 +195,18 @@ def _run_gemini_cli(
                     _cooldowns[(home, model)] = time.time() + 3600  # 1h cooldown
                     continue
                 elif error_type == "overload":
-                    # Retry same account up to 10 times with 1s pause — overload often clears in seconds
+                    # Retry same account 3x with 3s pause — overload usually clears in 5-30s
                     retries = getattr(_run_gemini_cli, '_overload_retries', {})
                     count = retries.get((home, model), 0)
-                    if count < 10:
+                    if count < 3:
                         retries[(home, model)] = count + 1
                         _run_gemini_cli._overload_retries = retries
-                        logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — retry {count+1}/10")
-                        time.sleep(1)
-                        available.insert(0, (home, model))  # re-add to front of queue
+                        logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — retry {count+1}/3")
+                        time.sleep(3)
+                        available.insert(0, (home, model))
                     else:
                         retries.pop((home, model), None)
-                        logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — giving up after 10 retries")
+                        logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — next account")
                     continue
                 elif error_type == "cancelled":
                     logger.debug("Gemini CLI interrupted")
