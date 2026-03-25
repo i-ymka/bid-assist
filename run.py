@@ -1035,8 +1035,11 @@ async def main():
 
 
 def signal_handler(sig, frame):
-    """Handle Ctrl+C gracefully."""
-    logger.info("Received shutdown signal...")
+    """Handle Ctrl+C. First press = graceful shutdown, second press = force kill."""
+    if shutdown_event.is_set():
+        logger.info("Force shutdown!")
+        os._exit(1)
+    logger.info("Shutting down... (press Ctrl+C again to force)")
     shutdown_event.set()
 
 
