@@ -164,7 +164,7 @@ class FreelancerClient:
                     logger.info(f"Bids remaining: {remaining} / {limit}")
                     return remaining
 
-            logger.warning(f"getBidLimit failed: {response.status_code}")
+            logger.debug(f"getBidLimit failed: {response.status_code}")
             return None
 
         except Exception as e:

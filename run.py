@@ -571,8 +571,9 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                         if cached_feasibility is not None:
                             break
                     if cached_feasibility is None:
-                        logger.debug(f"Project {project_id}: no Call 1 result after 2 min, removing from queue")
+                        logger.debug(f"Project {project_id}: no Call 1 result after 2 min, skipping")
                         repo.remove_from_queue(project_id)
+                        repo.add_processed_project(project_id)
                         continue
 
                 # We own the slot — run Call 1 exclusively
@@ -897,11 +898,9 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
 
         except Exception as e:
             logger.error(f"Analysis error: {e}", exc_info=True)
-            # If a project was mid-analysis, remove it so the next poll cycle can re-queue it.
-            # Without this, the project stays frozen in 'analyzing' state forever.
             if project_id:
                 repo.remove_from_queue(project_id)
-                logger.warning(f"Removed project {project_id} from queue after analysis exception")
+                repo.add_processed_project(project_id)
             await asyncio.sleep(10)
 
 

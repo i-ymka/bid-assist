@@ -900,7 +900,8 @@ async def schedule_bid_update(
                     else:
                         logger.info(f"      {total} bids, avg ${avg:.0f}")
                 except Exception as edit_err:
-                    logger.error(f"Failed to edit message for {project_id}: {edit_err}")
+                    if "message is not modified" not in str(edit_err).lower():
+                        logger.error(f"Failed to edit message for {project_id}: {edit_err}")
             else:
                 logger.debug(f"Bids line unchanged for {project_id}")
         else:
@@ -1000,7 +1001,8 @@ async def schedule_price_corrections(
                     disable_web_page_preview=True,
                 )
             except Exception as e:
-                logger.error(f"Failed to edit message for {project_id}: {e}")
+                if "message is not modified" not in str(e).lower():
+                    logger.error(f"Failed to edit message for {project_id}: {e}")
 
             # Если бид отозван — дальше нет смысла
             if price_line and "retracted" in price_line:
