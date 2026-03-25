@@ -219,6 +219,7 @@ def _run_gemini_cli(
             # Clear overload retry counter on success
             retries = getattr(_run_gemini_cli, '_overload_retries', {})
             retries.pop((home, model), None)
+            logger.info(f"{label}/{_short_model(model)}: [bold green]ok[/bold green]")
 
             response = result.stdout.strip()
             for boilerplate in [
