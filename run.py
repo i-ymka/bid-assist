@@ -552,6 +552,9 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                     logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  (${_target_est:.0f} < ${_min_daily_rate}/d)")
                     repo.remove_from_queue(project_id)
                     repo.add_processed_project(project_id)
+                    # Tell other accounts so they don't waste a Gemini call
+                    if shared_repo.try_claim(project_id):
+                        shared_repo.store_result(project_id, "SKIP", 0, "pre-filter: price too low")
                     continue
 
             # --- Shared analysis cache: avoid duplicate Call 1 across accounts ---
