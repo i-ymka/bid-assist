@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # Activated after 3 retry attempts on the pro model.
     # TODO: Remove this fallback and revert to pro-only once gemini-3.1-pro-preview
     #       becomes stable (503 overloads resolved on Google's side).
-    gemini_overload_fallback_model: str = Field("gemini-3.1-flash-preview", alias="GEMINI_OVERLOAD_FALLBACK_MODEL")
+    gemini_overload_fallback_model: str = Field("gemini-3-flash-preview", alias="GEMINI_OVERLOAD_FALLBACK_MODEL")
 
     # Gemini account pool (multi-account quota rotation)
     gemini_home_primary: str = Field("", alias="GEMINI_HOME_PRIMARY")   # path for pro account home dir (empty = default ~/.gemini)
