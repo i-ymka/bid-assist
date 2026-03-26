@@ -1273,7 +1273,7 @@ def _build_spinner_keyboard(key: str, value) -> InlineKeyboardMarkup:
     if key in ("tier2_pct", "tier3_pct"):
         rows.append([
             InlineKeyboardButton(display, callback_data=f"spinner:{key}:0"),
-            InlineKeyboardButton("← Назад", callback_data="settings:coeff_menu"),
+            InlineKeyboardButton("← Back", callback_data="settings:coeff_menu"),
         ])
     else:
         rows.append([
@@ -1281,7 +1281,7 @@ def _build_spinner_keyboard(key: str, value) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ Done", callback_data="spinner:done"),
         ])
     if key == "daily_rate":
-        rows.append([InlineKeyboardButton("⚙️ Коэффициенты по длительности", callback_data="settings:coeff_menu")])
+        rows.append([InlineKeyboardButton("⚙️ Duration coefficients", callback_data="settings:coeff_menu")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1291,16 +1291,16 @@ def _build_coeff_menu(repo: ProjectRepository) -> tuple[str, InlineKeyboardMarku
     t2 = repo.get_rate_tier2_pct()
     t3 = repo.get_rate_tier3_pct()
     text = (
-        f"⚙️ <b>Коэффициенты по длительности</b>\n\n"
-        f"Базовая ставка: <b>${mdr}/день</b>\n\n"
-        f"• 1-3 дня:  100% = <b>${mdr}/д</b>\n"
-        f"• 4-7 дней: {t2}% = <b>${int(mdr * t2 / 100)}/д</b>\n"
-        f"• 8+ дней:  {t3}% = <b>${int(mdr * t3 / 100)}/д</b>"
+        f"⚙️ <b>Duration coefficients</b>\n\n"
+        f"Base rate: <b>${mdr}/day</b>\n\n"
+        f"• 1-3 days:  100% = <b>${mdr}/d</b>\n"
+        f"• 4-7 days: {t2}% = <b>${int(mdr * t2 / 100)}/d</b>\n"
+        f"• 8+ days:  {t3}% = <b>${int(mdr * t3 / 100)}/d</b>"
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"4-7 дней: {t2}%", callback_data="settings:tier2_pct")],
-        [InlineKeyboardButton(f"8+ дней: {t3}%",  callback_data="settings:tier3_pct")],
-        [InlineKeyboardButton("← Назад к ставке", callback_data="settings:daily_rate")],
+        [InlineKeyboardButton(f"4-7 days: {t2}%", callback_data="settings:tier2_pct")],
+        [InlineKeyboardButton(f"8+ days: {t3}%",  callback_data="settings:tier3_pct")],
+        [InlineKeyboardButton("← Back to rate", callback_data="settings:daily_rate")],
     ])
     return text, keyboard
 
