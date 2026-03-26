@@ -194,13 +194,13 @@ def _run_gemini_cli(
                     _cooldowns[(home, model)] = time.time() + 3600  # 1h cooldown
                     continue
                 elif error_type == "overload":
-                    # Retry same account 15x with 3s pause — ~45s window before fallback
+                    # Retry same account 3x with 3s pause — ~9s window, then flash fallback
                     retries = getattr(_run_gemini_cli, '_overload_retries', {})
                     count = retries.get((home, model), 0)
-                    if count < 15:
+                    if count < 3:
                         retries[(home, model)] = count + 1
                         _run_gemini_cli._overload_retries = retries
-                        logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — retry {count+1}/15")
+                        logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — retry {count+1}/3")
                         time.sleep(3)
                         available.insert(0, (home, model))
                     else:
