@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-03-26/27 | [INFRA] Деплой на Vultr + Gemini quota/overload fixes
+
+**Суть:**
+1. **Деплой на Vultr VPS** (70.34.205.112, Ubuntu 22.04, $5/mo). Оба бота запущены как systemd сервисы (`bid-ymka.service`, `bid-yehia.service`). Мак больше не запускает бота.
+2. **Исправлен баг двойного Call 1** (`1df6412`): при неудаче Call 1 shared_repo делал `release_claim` → второй бот видел пустой кэш и повторял вызов. Фикс: писать `FAILED` вердикт вместо release.
+3. **ВРЕМЕННЫЙ flash fallback** (`e546f4a`): после 3 retry на overload — Call 1 переключается на `gemini-3.1-flash-preview` вместо отказа. **Убрать как только gemini-3.1-pro-preview стабилизируется.**
+4. **Overload retries: 15→3** (`3069961`): 45 секунд ожидания до fallback были слишком долгими.
+
+**Мотивация:**
+- Мак работал без выключения месяцами — деградация железа.
+- Google 25.03.2026: Pro модели заблокированы для free tier → free pool отключён.
+- gemini-3.1-pro-preview периодически уходит в 503 overload (30–120 мин). Второй про аккаунт не поможет — это серверная проблема Google, не зависит от тарифа.
+
+**Реальность (важно знать):**
+- scp зависает на Vultr — всегда использовать rsync для копирования файлов.
+- Реальная квота AI Pro для Gemini CLI: ~18–150 req/day (документировано 1500, но известный баг Google, issue открыт в gemini-cli repo).
+- Квота сбрасывается в **07:00 UTC** (полночь Pacific Time), не в полночь UTC.
+- Flash (`gemini-3.1-flash-preview`) для Call 1 даёт чуть хуже качество анализа, но лучше чем пропустить проект.
+
+**TODO:**
+- Убрать `GEMINI_OVERLOAD_FALLBACK_MODEL` и flash fallback из `gemini_analyzer.py` когда Google починит 503 на pro-3.1.
+
+---
+
 ## 2026-03-23 | [FEAT] v2.9 — Multi-account Gemini pool + Spinner keyboard input
 
 **Суть:**
