@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     gemini_pool_model: str = Field("gemini-2.5-flash", alias="GEMINI_POOL_MODEL")        # Call 1: pool (free accounts) — Pro models blocked on free tier since 2026-03-25
     bid_pool_model: str = Field("gemini-3.1-flash-lite-preview", alias="BID_POOL_MODEL") # Call 2: pool (free accounts)
 
+    # TEMPORARY: Flash fallback for Call 1 when pro model hits server overload (503).
+    # Activated only after 15 retry attempts on the pro model.
+    # TODO: Remove this fallback and revert to pro-only once gemini-3.1-pro-preview
+    #       becomes stable (503 overloads resolved on Google's side).
+    gemini_overload_fallback_model: str = Field("gemini-3.1-flash-preview", alias="GEMINI_OVERLOAD_FALLBACK_MODEL")
+
     # Gemini account pool (multi-account quota rotation)
     gemini_home_primary: str = Field("", alias="GEMINI_HOME_PRIMARY")   # path for pro account home dir (empty = default ~/.gemini)
     gemini_home_pool_raw: str = Field("", alias="GEMINI_HOME_POOL")     # comma-separated paths for free account home dirs

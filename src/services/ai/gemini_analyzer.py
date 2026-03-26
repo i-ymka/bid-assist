@@ -21,8 +21,9 @@ logger = logging.getLogger(__name__)
 
 _MODEL_SHORT: dict[str, str] = {
     "gemini-3.1-pro-preview":        "pro-3.1",
+    "gemini-3.1-flash-preview":      "flash-3.1",      # TEMPORARY overload fallback for Call 1
     "gemini-3-flash-preview":        "flash-3",
-    "gemini-3.1-flash-lite-preview": "flash-3.1",
+    "gemini-3.1-flash-lite-preview": "flash-3.1-lite",
     "gemini-2.5-pro":                "pro-2.5",
     "gemini-2.5-flash":              "flash-2.5",
     "gemini-2.5-flash-lite":         "flash-lite-2.5",
@@ -193,7 +194,7 @@ def _run_gemini_cli(
                     _cooldowns[(home, model)] = time.time() + 3600  # 1h cooldown
                     continue
                 elif error_type == "overload":
-                    # Retry same account 15x with 3s pause — ~45s window before giving up
+                    # Retry same account 15x with 3s pause — ~45s window before fallback
                     retries = getattr(_run_gemini_cli, '_overload_retries', {})
                     count = retries.get((home, model), 0)
                     if count < 15:
@@ -204,7 +205,14 @@ def _run_gemini_cli(
                         available.insert(0, (home, model))
                     else:
                         retries.pop((home, model), None)
-                        logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — giving up")
+                        # TEMPORARY: fall back to flash when pro is persistently overloaded.
+                        # TODO: remove once gemini-3.1-pro-preview 503s are resolved by Google.
+                        fallback = settings.gemini_overload_fallback_model
+                        if fallback and fallback != model:
+                            logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — falling back to {_short_model(fallback)} [dim](TEMPORARY — revert when pro-3.1 stabilises)[/dim]")
+                            available.append((home, fallback))
+                        else:
+                            logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — giving up")
                     continue
                 elif error_type == "cancelled":
                     logger.debug("Gemini CLI interrupted")
