@@ -612,15 +612,15 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                         )
                         cached_feasibility = raw_feasibility
                     else:
-                        # Call 1 failed — release slot, remove from queue
-                        shared_repo.release_claim(project_id)
+                        # Call 1 failed (quota/overload) — store FAILED so other accounts don't retry
+                        shared_repo.store_result(project_id, "FAILED", 0, "call1 failed")
                         repo.remove_from_queue(project_id)
                         repo.add_processed_project(project_id)
                         continue
 
             # Use cached_feasibility (from cache hit, wait-loop, or our own Call 1)
             logger.debug(f"Project {project_id}: Call 1 result verdict={cached_feasibility['verdict']}")
-            if cached_feasibility.get("verdict") == "SKIP":
+            if cached_feasibility.get("verdict") in ("SKIP", "FAILED"):
                 repo.remove_from_queue(project_id)
                 repo.add_processed_project(project_id)
                 continue
