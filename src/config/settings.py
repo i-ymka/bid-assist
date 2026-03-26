@@ -26,11 +26,9 @@ class Settings(BaseSettings):
 
     # TEMPORARY: Flash fallback for Call 1 when pro model hits server overload (503).
     # Activated after 3 retry attempts on the pro model.
-    # Uses gemini-2.5-flash (separate quota bucket, visible in /stats) instead of
-    # gemini-3.1-flash-preview which shares quota with gemini-3.1-pro-preview.
     # TODO: Remove this fallback and revert to pro-only once gemini-3.1-pro-preview
     #       becomes stable (503 overloads resolved on Google's side).
-    gemini_overload_fallback_model: str = Field("gemini-2.5-flash", alias="GEMINI_OVERLOAD_FALLBACK_MODEL")
+    gemini_overload_fallback_model: str = Field("gemini-3.1-flash-preview", alias="GEMINI_OVERLOAD_FALLBACK_MODEL")
 
     # Gemini account pool (multi-account quota rotation)
     gemini_home_primary: str = Field("", alias="GEMINI_HOME_PRIMARY")   # path for pro account home dir (empty = default ~/.gemini)

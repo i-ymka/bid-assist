@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 _MODEL_SHORT: dict[str, str] = {
     "gemini-3.1-pro-preview":        "pro-3.1",
-    "gemini-3.1-flash-preview":      "flash-3.1",      # kept for reference, no longer default fallback
+    "gemini-3.1-flash-preview":      "flash-3.1",      # TEMPORARY overload fallback for Call 1
     "gemini-3-flash-preview":        "flash-3",
     "gemini-3.1-flash-lite-preview": "flash-3.1-lite",
     "gemini-2.5-pro":                "pro-2.5",
