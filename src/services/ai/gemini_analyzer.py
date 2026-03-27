@@ -424,7 +424,8 @@ Output ONLY the BID: and FAIR_PRICE: lines. No other text.
 
     max_attempts = 2
     for attempt in range(1, max_attempts + 1):
-        logger.debug(f"[Call 2] Writing bid for project {project_id} (attempt {attempt}/{max_attempts})...")
+        suffix = f" [dim](attempt {attempt}/{max_attempts})[/dim]" if attempt > 1 else ""
+        logger.info(f"[dim]call2/{_short_model(settings.bid_model)}[/dim]  [cyan1]{title[:55]}[/cyan1]{suffix}")
         response = _run_gemini_cli(prompt, settings.bid_model, settings.bid_pool_model)
         if not response:
             return None, None

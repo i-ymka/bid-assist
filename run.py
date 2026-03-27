@@ -123,6 +123,8 @@ _console_theme = Theme({
 })
 _console = Console(theme=_console_theme, force_terminal=True, width=200, color_system="truecolor")
 
+import re as _re
+
 class _LevelPrefix(logging.Filter):
     """Prepend account name + timestamp to every log line, then level tag."""
     _TAGS = {
@@ -132,6 +134,8 @@ class _LevelPrefix(logging.Filter):
     }
     _ACCT_COLORS = {"ymka": "plum1", "yehia": "cornflower_blue"}
     _BLANK = "      "  # 6 spaces — same width as "WARN  "
+    # Messages that start with a status tag go in the tag column (no blank padding)
+    _STATUS_RE = _re.compile(r'^\[[^\]]+\](PASS|SKIP|NOPE|YEP|SENT|FAIL|BID)\b')
     def filter(self, record):
         acct_color = self._ACCT_COLORS.get(settings.username.lower(), "white")
         acct = f"[{acct_color}]{settings.username:<6}[/{acct_color}]"
@@ -145,10 +149,12 @@ class _LevelPrefix(logging.Filter):
                 record.msg = prefix + tag + str(record.msg)
             record.args = ()
         elif record.levelno == logging.INFO:
+            msg = str(record.msg)
+            pad = "" if self._STATUS_RE.match(msg) else self._BLANK
             try:
-                record.msg = prefix + self._BLANK + record.getMessage()
+                record.msg = prefix + pad + record.getMessage()
             except Exception:
-                record.msg = prefix + self._BLANK + str(record.msg)
+                record.msg = prefix + pad + msg
             record.args = ()
         return True
 
