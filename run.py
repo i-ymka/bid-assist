@@ -121,12 +121,10 @@ _console_theme = Theme({
     "logging.level.critical":"bold white on red",
     "logging.level.debug":   "dim white",
 })
-_console = Console(theme=_console_theme, force_terminal=True, width=200)
+_console = Console(theme=_console_theme, force_terminal=True, width=200, color_system="truecolor")
 
 class _LevelPrefix(logging.Filter):
-    """Inject colored level tag into messages (since show_level=False).
-    WARN/ERR/CRIT get colored tags. INFO gets blank padding unless it already
-    starts with a status word like PASS/SKIP/BID►/LIVE (those carry their own color)."""
+    """Prepend account name + timestamp to every log line, then level tag."""
     _TAGS = {
         logging.WARNING:  "[bright_yellow]WARN[/bright_yellow]  ",
         logging.ERROR:    "[red1]ERR! [/red1] ",
@@ -136,33 +134,32 @@ class _LevelPrefix(logging.Filter):
     _BLANK = "      "  # 6 spaces — same width as "WARN  "
     def filter(self, record):
         acct_color = self._ACCT_COLORS.get(settings.username.lower(), "white")
-        acct = f"[{acct_color}]{settings.username:<6}[/{acct_color}] "
+        acct = f"[{acct_color}]{settings.username:<6}[/{acct_color}]"
+        ts = datetime.fromtimestamp(record.created).strftime('%H:%M:%S')
+        prefix = f"{acct}  [dim][{ts}][/dim]  "
         tag = self._TAGS.get(record.levelno)
         if tag:
             try:
-                record.msg = tag + acct + record.getMessage()
+                record.msg = prefix + tag + record.getMessage()
             except Exception:
-                record.msg = tag + acct + str(record.msg)
+                record.msg = prefix + tag + str(record.msg)
             record.args = ()
         elif record.levelno == logging.INFO:
-            msg = str(record.msg)
-            if not msg.startswith("[bold"):
-                try:
-                    record.msg = self._BLANK + acct + record.getMessage()
-                except Exception:
-                    record.msg = self._BLANK + acct + msg
-                record.args = ()
+            try:
+                record.msg = prefix + self._BLANK + record.getMessage()
+            except Exception:
+                record.msg = prefix + self._BLANK + str(record.msg)
+            record.args = ()
         return True
 
 _rich_handler = RichHandler(
     console=_console,
     show_path=False,
     show_level=False,
-    omit_repeated_times=True,
+    show_time=False,
     rich_tracebacks=True,
     tracebacks_show_locals=False,
     markup=True,
-    log_time_format="[%H:%M:%S]",
 )
 _rich_handler.addFilter(_LevelPrefix())
 _rich_handler.setLevel(logging.INFO)
