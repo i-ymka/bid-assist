@@ -209,8 +209,7 @@ def _run_gemini_cli(
                         n = _overload_retries.get(key, 0) + 1
                         if n <= 3:
                             _overload_retries[key] = n
-                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — retry {n}/3 in 60s")
-                            time.sleep(60)
+                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — retry {n}/3")
                             available.append((home, model))
                         else:
                             _overload_retries.pop(key, None)
