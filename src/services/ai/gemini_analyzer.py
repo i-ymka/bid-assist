@@ -43,6 +43,9 @@ BID_WRITER_RULES_PATH = _ROOT / settings.prompts_dir / "bid_writer.md"
 # home_dir="" means default ~/.gemini (pro account).
 _cooldowns: dict[tuple[str, str], float] = {}
 
+# Flash overload retry counters. Key: (home_dir, model), Value: retry count so far.
+_overload_retries: dict[tuple[str, str], int] = {}
+
 # Set to True when all accounts/models are exhausted. Consumed once by analysis_loop to send notification.
 _all_exhausted_flag: bool = False
 
@@ -115,7 +118,7 @@ def _extract_clean_error(stderr: str) -> str:
         return "Operation cancelled (interrupted)"
     for line in stderr.strip().split("\n"):
         line = line.strip()
-        if line and not line.startswith(("Loaded cached", "YOLO mode", "Attempt", "    at ")):
+        if line and not line.startswith(("Loaded cached", "YOLO mode", "Attempt", "    at ", "Keychain initialization")):
             return line[:200]
     return stderr[:200]
 
@@ -194,15 +197,24 @@ def _run_gemini_cli(
                     _cooldowns[(home, model)] = time.time() + 3600  # 1h cooldown
                     continue
                 elif error_type == "overload":
-                    # No retries — overload lasts hours, retries never helped (0/0 in logs).
-                    # TEMPORARY: fall back to flash immediately.
-                    # TODO: remove once gemini-3.1-pro-preview 503s are resolved by Google.
                     fallback = settings.gemini_overload_fallback_model
                     if fallback and fallback != model:
+                        # Pro model — immediate flash fallback (pro overloads last hours, 0/0 retries helped)
+                        # TEMPORARY: TODO remove once gemini-3.1-pro-preview 503s are resolved by Google.
                         logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — falling back to {_short_model(fallback)} [dim](TEMPORARY)[/dim]")
                         available.append((home, fallback))
                     else:
-                        logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — giving up")
+                        # Flash model — retry up to 3 times with 60s delay (flash overloads tend to be short)
+                        key = (home, model)
+                        n = _overload_retries.get(key, 0) + 1
+                        if n <= 3:
+                            _overload_retries[key] = n
+                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — retry {n}/3 in 60s")
+                            time.sleep(60)
+                            available.append((home, model))
+                        else:
+                            _overload_retries.pop(key, None)
+                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — giving up after 3 retries")
                     continue
                 elif error_type == "cancelled":
                     logger.debug("Gemini CLI interrupted")
@@ -212,9 +224,7 @@ def _run_gemini_cli(
                     continue
 
             _cooldowns.pop((home, model), None)
-            # Clear overload retry counter on success
-            retries = getattr(_run_gemini_cli, '_overload_retries', {})
-            retries.pop((home, model), None)
+            _overload_retries.pop((home, model), None)
             logger.info(f"{label}/{_short_model(model)}: [bold green]ok[/bold green]")
 
             response = result.stdout.strip()
