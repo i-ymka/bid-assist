@@ -207,13 +207,13 @@ def _run_gemini_cli(
                         # Flash model — retry up to 3 times with 60s delay (flash overloads tend to be short)
                         key = (home, model)
                         n = _overload_retries.get(key, 0) + 1
-                        if n <= 3:
+                        if n <= 1:
                             _overload_retries[key] = n
-                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — retry {n}/3")
+                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — retry {n}/1")
                             available.append((home, model))
                         else:
                             _overload_retries.pop(key, None)
-                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — giving up after 3 retries")
+                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — giving up")
                     continue
                 elif error_type == "cancelled":
                     logger.debug("Gemini CLI interrupted")
