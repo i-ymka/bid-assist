@@ -34,10 +34,17 @@ def _short_model(model: str) -> str:
     return _MODEL_SHORT.get(model, model)
 
 
-_TITLE_COLORS = ["plum1", "gold1", "aquamarine1", "yellow3", "light_slate_blue"]
+_TITLE_COLORS = ["plum1", "aquamarine1", "gold1", "light_slate_blue", "yellow3"]
+_color_map: dict[int, str] = {}  # project_id → assigned color
+_color_idx: int = 0              # next color index (round-robin)
+
 
 def _title_color(project_id: int) -> str:
-    return _TITLE_COLORS[project_id % len(_TITLE_COLORS)]
+    global _color_idx
+    if project_id not in _color_map:
+        _color_map[project_id] = _TITLE_COLORS[_color_idx % len(_TITLE_COLORS)]
+        _color_idx += 1
+    return _color_map[project_id]
 
 
 # Prompt paths (configurable per-account via PROMPTS_DIR in .env)

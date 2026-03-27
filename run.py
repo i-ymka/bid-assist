@@ -99,7 +99,7 @@ from src.services.freelancer import FreelancerClient, ProjectService, BiddingSer
 from src.services.storage import ProjectRepository
 from src.services.telegram.handlers import setup_handlers
 from src.services.telegram.notifier import Notifier
-from src.services.ai.gemini_analyzer import analyze_project, analyze_feasibility, consume_exhaustion_flag
+from src.services.ai.gemini_analyzer import analyze_project, analyze_feasibility, consume_exhaustion_flag, _title_color
 from src.services.storage.shared_repository import SharedAnalysisRepository
 from src.models import AIAnalysis
 from src.models.bid import Bid, Verdict
@@ -125,10 +125,6 @@ _console = Console(theme=_console_theme, force_terminal=True, width=200, color_s
 
 import re as _re
 
-_TITLE_COLORS = ["plum1", "gold1", "aquamarine1", "yellow3", "light_slate_blue"]
-
-def _title_color(project_id: int) -> str:
-    return _TITLE_COLORS[project_id % len(_TITLE_COLORS)]
 
 class _LevelPrefix(logging.Filter):
     """Prepend account name + timestamp to every log line, then level tag."""

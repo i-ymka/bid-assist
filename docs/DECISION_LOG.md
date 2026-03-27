@@ -4,6 +4,34 @@
 
 ---
 
+## 2026-03-27 | [FIX] Call 1 timeout потеря проекта + retract_bid 400 + цвета терминала
+
+**Суть:**
+
+1. **Call 1 timeout / exhaustion — проект больше не теряется** (`e47114b`) — при таймауте Gemini CLI (1200s) во время Call 1 бот писал `store_result(FAILED)` + `remove_from_queue` + **`add_processed_project`** — проект пропадал навсегда. Причина: ветка Call 1 не проверяла `consume_exhaustion_flag()`, хотя Call 2 уже делал это. Фикс: добавили ту же логику — если флаг исчерпания выставлен, `mark_queue_status("pending")` + `sleep(1800)` + уведомление; иначе только `remove_from_queue` + `add_processed_project`.
+
+2. **Call 2 таймаут явный** (`e47114b`) — `write_bid()` вызывал `_run_gemini_cli()` без `timeout=`, полагаясь на дефолт 600s. Сделан явным: `timeout=600`. Дефолт `_run_gemini_cli` был и остался 600s — изменений в поведении нет, только читаемость.
+
+3. **`retract_bid` 400 Bad Request** (`cc141c0`) — PUT без тела запроса → Freelancer API: `400: Unable to decode required JSON for this method`. `requests` не добавляет `Content-Type: application/json` когда `json=None`. Фикс: передать `data={}` → `requests` шлёт `{}` с нужным заголовком.
+
+4. **Ротирующиеся цвета проектов** (`e47114b`) — все названия проектов были одинаково `[cyan1]` → нельзя глазами отследить один проект через несколько строк лога (call1 → PASS → call2 → SENT). Введена функция `_title_color(project_id)`: `project_id % 5` → один из 5 цветов (`plum1`, `gold1`, `aquamarine1`, `yellow3`, `light_slate_blue`). Определена в обоих файлах (run.py и gemini_analyzer.py) — 3 строки, отдельный модуль не нужен.
+
+5. **Точечные правки цветов** (`e47114b`):
+   - `SKIP`: `indian_red` → `red3` (ярче, отличимее от NOPE)
+   - `call1/…` и `call2/…` ярлыки: `[dim]` → `[light_cyan1]`
+   - `ok` (успешный вызов Gemini): `[bold green]` → `[bright_green]`
+
+**Мотивация:**
+- Таймаут flash при перегрузке pro (~20 мин) → проект исчезал; обнаружено по логу `05:16:04 ERR! Gemini CLI timed out`
+- retract_bid падал с 400 каждый раз когда бот пытался отозвать старые биды
+- Все проекты в одном цвете → невозможно читать лог при нескольких одновременных проектах
+
+**Реальность:**
+- Flash таймаут 1200s = 20 мин — это Call 1 с flash-fallback (pro overloaded → flash тоже завис). Не ретраи, просто медленный ответ или зависание.
+- `retract_bid` теперь шлёт `{}` — минимально допустимое тело для Freelancer API
+
+---
+
 ## 2026-03-27 | [FIX] Bugfix session — модели, пути, логи, shared cache
 
 **Суть (все фиксы за сессию):**
