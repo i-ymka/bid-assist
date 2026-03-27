@@ -276,7 +276,7 @@ Write your THOUGHTS first (Risk check, Tech check, Red Zone check, Day estimate)
 Then output ===RESULT=== and the structured result.
 """
 
-    logger.debug(f"[Call 1] Analyzing: {title[:50]}...")
+    logger.info(f"[dim]call1/{_short_model(settings.gemini_model)}[/dim]  [cyan1]{title[:55]}[/cyan1]")
     response = _run_gemini_cli(prompt, settings.gemini_model, settings.gemini_pool_model, timeout=1200)
     if not response:
         return None
