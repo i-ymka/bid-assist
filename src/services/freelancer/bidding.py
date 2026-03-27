@@ -370,6 +370,7 @@ class BiddingService:
         try:
             response = self._client.put(
                 f"/projects/0.1/bids/{bid_id}/",
+                data={},
                 params={"action": "retract"},
             )
             if response.get("status") == "success":
