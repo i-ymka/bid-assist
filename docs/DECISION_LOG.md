@@ -4,6 +4,91 @@
 
 ---
 
+## 2026-03-27 | [FIX] Bugfix session — модели, пути, логи, shared cache
+
+**Суть (все фиксы за сессию):**
+
+1. **`send_to_all` → `_send_to_all_chats`** (`572e7b0`) — опечатка ломала уведомление "все аккаунты исчерпаны". Метод называется `_send_to_all_chats`, вызывался как `send_to_all`.
+
+2. **`BID_MODEL` в `.env`** (`572e7b0`) — оба `.env` содержали `gemini-3.1-flash-lite-preview` (несуществующая модель). Исправлено на `gemini-3-flash-preview`.
+
+3. **Flash overload retries** (`12b0b6c`) — при overload flash модели бот сразу сдавался. Добавлены 3 ретрая без задержки (CLI сам тратит ~2 мин на попытку).
+
+4. **Keychain шум скрыт из лога** (`12b0b6c`) — строка `Keychain initialization encountered an error: libsecret-1.so.0` фильтруется в `_extract_clean_error()`, теперь показывается реальная ошибка.
+
+5. **`GEMINI_HOME_PRIMARY` Mac-путь на сервере** — после rsync на сервер попал путь `/Users/ymka_kayotova/.gemini_accounts/pro` вместо `/root/.gemini_accounts/pro`. Бот вообще не мог найти Gemini-аккаунт. Исправлено прямо на сервере через sed.
+
+6. **Акаунт левее времени + truecolor** (`729251b`) — `show_time=False` + время вручную в сообщении → `ymka  [HH:MM:SS]  message`. `color_system="truecolor"` → plum1/cornflower_blue рендерятся правильно.
+
+7. **Таймаут ожидания shared cache** (`3918f24`) — при ожидании Call 1 от другого аккаунта (2 мин таймаут) бот помечал проект как `processed` навсегда. Ymka теряла все проекты пока яхия анализировал (~8 мин с overload). Исправлено: при таймауте просто убрать из очереди, следующий poll заново поставит.
+
+8. **PASS/YEP/etc в колонку тегов** (`358a68c`) — статус-строки шли с `_BLANK` как обычный INFO. Добавлен `_STATUS_RE` в фильтр: если строка начинается со статусного тега — без blank-отступа.
+
+9. **Call 1 и Call 2 старт-логи** (`358a68c`, `017dfed`) — добавлены INFO логи при старте каждого вызова: `call1/pro-3.1  title` и `call2/flash-3  title`. Причина: Call 2 мог молчать 7+ минут (flash медленно отвечал без overload) — теперь виден старт.
+
+**Мотивация:**
+- Ymka (новый free аккаунт) ни разу не разместила бид из-за накопившихся багов
+- `GEMINI_HOME_PRIMARY` с Mac-путём = бот вообще не использовал Gemini CLI
+- Shared cache таймаут = ymka теряла все проекты которые яхия брал на анализ
+
+**Реальность (важно):**
+- Flash-3 иногда отвечает медленно (7+ мин) без overload — это нормально, не ретраи
+- Rsync локальных `.env` перетирает серверные пути — **после rsync всегда проверять GEMINI_HOME_PRIMARY на сервере**
+- Оба бота на одном Google-аккаунте → shared flash quota bucket → при overload pro оба бота жгут flash быстрее
+
+**Workflow rsync (правило):**
+```bash
+rsync -az .env.ymka .env.yehia root@70.34.205.112:/root/bid-assist/
+# Затем ОБЯЗАТЕЛЬНО:
+ssh root@70.34.205.112 "grep GEMINI_HOME_PRIMARY /root/bid-assist/.env.ymka /root/bid-assist/.env.yehia"
+```
+
+---
+
+## 2026-03-27 | [UX] Terminal log redesign
+
+**Суть:**
+1. **Цветовая схема** — каждый элемент лога получил свой цвет:
+   - Имена аккаунтов: `ymka`=plum1, `yehia`=cornflower_blue (динамически из settings.username)
+   - Названия проектов: cyan1 (везде — в ▸, PASS, SKIP, NOPE, SENT, BID)
+   - `PASS`=sea_green2, `SKIP`=indian_red, `NOPE`=slate_blue1
+   - `SENT`/`BID`=royal_blue1, `WARN`/`server overload`=bright_yellow, `ERR!`=red1
+2. **Console width=200** — строки больше не переносятся при просмотре через journalctl
+3. **Убран шум из логов** (→ debug): очередь из polling (+N queued, названия проектов), pre-AI NOPE (recheck filter, price pre-filter)
+4. **Project IDs → titles** в сообщениях об ошибках Call 1 / Call 2
+5. **Имя аккаунта** добавлено в каждую строку лога — видно в interleaved journalctl потоке
+
+**Мотивация:** При просмотре двух ботов в одном journalctl поток строки перемешаны — имя аккаунта помогает разобраться чья строка. Проекты показывались дважды (оба бота логировали queue). Pre-AI NOPEs засоряли вывод.
+
+---
+
+## 2026-03-27 | [FIX] Gemini models audit + overload strategy
+
+**Суть:**
+1. **Модели исправлены** — через `/stats` установлено что на аккаунте доступно только 5 моделей. `gemini-3.1-flash-preview` и `gemini-3.1-flash-lite-preview` — **не существуют** на этом аккаунте. Фиксы:
+   - Call 1 fallback: `gemini-3.1-flash-preview` → `gemini-3-flash-preview`
+   - Call 2 (`BID_MODEL`): `gemini-3.1-flash-lite-preview` → `gemini-3-flash-preview`
+2. **Overload retries убраны** (`460e3b1`): анализ логов показал 0 успехов за всё время — ретраи никогда не помогали. Overload длится часами. Теперь при overload — сразу на flash-3.
+3. **Quota buckets задокументированы** (см. ниже).
+4. **Gemini CLI auto-update** на сервере: cron `0 7 * * *` → `/usr/local/bin/update-gemini.sh` (npm install -g, лог в `/var/log/gemini-update.log`).
+
+**Доступные модели и бакеты квот:**
+| Модель | Бакет | Сброс |
+|---|---|---|
+| `gemini-3.1-pro-preview` | Pro (вместе с 2.5-pro) | 12:10 AM local |
+| `gemini-2.5-pro` | Pro (вместе с 3.1-pro) | 12:10 AM local |
+| `gemini-3-flash-preview` | Flash (вместе с 2.5-flash) | 12:40 AM local |
+| `gemini-2.5-flash` | Flash (вместе с 3-flash) | 12:40 AM local |
+| `gemini-2.5-flash-lite` | отдельный | 9:01 AM local |
+
+**Важно:** `gemini-3-flash-preview` умнее `gemini-2.5-pro` по бенчмаркам (новое поколение бьёт старый Pro).
+
+**Реальность:**
+- Несуществующие модели возвращают ошибку классифицируемую как "quota exhausted" — вводило в заблуждение.
+- Два бота на одном аккаунте → shared quota bucket, in-memory cooldowns per-process не синхронизированы.
+
+---
+
 ## 2026-03-26/27 | [INFRA] Деплой на Vultr + Gemini quota/overload fixes
 
 **Суть:**

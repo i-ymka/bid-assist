@@ -125,6 +125,11 @@ _console = Console(theme=_console_theme, force_terminal=True, width=200, color_s
 
 import re as _re
 
+_TITLE_COLORS = ["plum1", "gold1", "aquamarine1", "yellow3", "light_slate_blue"]
+
+def _title_color(project_id: int) -> str:
+    return _TITLE_COLORS[project_id % len(_TITLE_COLORS)]
+
 class _LevelPrefix(logging.Filter):
     """Prepend account name + timestamp to every log line, then level tag."""
     _TAGS = {
@@ -597,7 +602,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                     # Got result from wait — fall through to use cached_feasibility below
                 else:
                     # We own the slot — run Call 1 exclusively
-                    logger.info(f"[cyan1]  ▸ {project_data['title'][:60]}[/cyan1]")
+                    logger.info(f"[{_title_color(project_id)}]  ▸ {project_data['title'][:60]}[/{_title_color(project_id)}]")
                     repo.mark_queue_status(project_id, "analyzing")
                     try:
                         raw_feasibility = await loop.run_in_executor(
@@ -617,10 +622,16 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                         )
                         cached_feasibility = raw_feasibility
                     else:
-                        # Call 1 failed (quota/overload) — store FAILED so other accounts don't retry
+                        # Call 1 failed (quota/overload/timeout) — store FAILED so other accounts don't retry
                         shared_repo.store_result(project_id, "FAILED", 0, "call1 failed")
-                        repo.remove_from_queue(project_id)
-                        repo.add_processed_project(project_id)
+                        if consume_exhaustion_flag():
+                            logger.warning("All Gemini accounts exhausted (Call 1) — sending notification, pausing 30 min")
+                            await notifier.send_quota_exhausted_notification()
+                            repo.mark_queue_status(project_id, "pending")
+                            await asyncio.sleep(1800)
+                        else:
+                            repo.remove_from_queue(project_id)
+                            repo.add_processed_project(project_id)
                         continue
 
             # Use cached_feasibility (from cache hit, wait-loop, or our own Call 1)
@@ -694,11 +705,11 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                         None, project_service.get_project_details, project_id
                     )
                     if not fresh_project:
-                        logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [cyan1]{project_data['title'][:55]}[/cyan1]  (project closed)")
+                        logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{_title_color(project_id)}]{project_data['title'][:55]}[/{_title_color(project_id)}]  (project closed)")
                         continue
                     fresh_bid_count = fresh_project.bid_stats.bid_count
                     if fresh_bid_count > max_bids_now:
-                        logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [cyan1]{project_data['title'][:55]}[/cyan1]  ({fresh_bid_count} bids > limit {max_bids_now})")
+                        logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{_title_color(project_id)}]{project_data['title'][:55]}[/{_title_color(project_id)}]  ({fresh_bid_count} bids > limit {max_bids_now})")
                         continue
 
                     # Auto-bid: place bid immediately
@@ -804,7 +815,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                             error_lower = bid_result.message.lower()
                             if "preferred freelancer" in error_lower:
                                 # Project became preferred-only after being queued — silent skip
-                                logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [cyan1]{project_data['title'][:55]}[/cyan1]  (preferred-only)")
+                                logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{_title_color(project_id)}]{project_data['title'][:55]}[/{_title_color(project_id)}]  (preferred-only)")
                             elif "used all" in error_lower or "all of your bids" in error_lower or ("bid" in error_lower and ("limit" in error_lower or "remain" in error_lower or "run out" in error_lower)):
                                 # Disable auto-bid
                                 repo.set_auto_bid(False)
@@ -828,7 +839,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                     # Mark notification as sent in bid_history
                     if notif_sent:
                         repo.mark_notification_sent(project_id)
-                        logger.info(f"[royal_blue1]SENT[/royal_blue1]  [cyan1]{project_data['title'][:55]}[/cyan1]  ${result.amount}  ({result.period}d)")
+                        logger.info(f"[royal_blue1]SENT[/royal_blue1]  [{_title_color(project_id)}]{project_data['title'][:55]}[/{_title_color(project_id)}]  ${result.amount}  ({result.period}d)")
                 else:
                     # Manual mode: store pending bid and send notification with Place Bid button
                     repo.add_pending_bid(
@@ -902,7 +913,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                                     original_keyboard=orig_keyboard,
                                 )
                             )
-                        logger.info(f"[royal_blue1]BID[/royal_blue1]  [cyan1]{project_data['title'][:55]}[/cyan1]  ${result.amount}  ({result.period}d)")
+                        logger.info(f"[royal_blue1]BID[/royal_blue1]  [{_title_color(project_id)}]{project_data['title'][:55]}[/{_title_color(project_id)}]  ${result.amount}  ({result.period}d)")
             else:
                 # SKIP verdict — send notification if receive_skipped is enabled
                 if repo.get_receive_skipped():
@@ -918,7 +929,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                             url=project_data.get("url", ""),
                             summary=result.summary,
                         )
-                    logger.info(f"[indian_red]SKIP[/indian_red]  [cyan1]{project_data['title'][:55]}[/cyan1]")
+                    logger.info(f"[red3]SKIP[/red3]  [{_title_color(project_id)}]{project_data['title'][:55]}[/{_title_color(project_id)}]")
                 else:
                     logger.debug(f"SKIP (muted)  {project_data['title'][:55]}")
 

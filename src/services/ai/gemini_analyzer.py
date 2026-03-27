@@ -34,6 +34,12 @@ def _short_model(model: str) -> str:
     return _MODEL_SHORT.get(model, model)
 
 
+_TITLE_COLORS = ["plum1", "gold1", "aquamarine1", "yellow3", "light_slate_blue"]
+
+def _title_color(project_id: int) -> str:
+    return _TITLE_COLORS[project_id % len(_TITLE_COLORS)]
+
+
 # Prompt paths (configurable per-account via PROMPTS_DIR in .env)
 _ROOT = Path(__file__).parent.parent.parent.parent
 ANALYSIS_RULES_PATH = _ROOT / settings.prompts_dir / "analyze.md"
@@ -224,7 +230,7 @@ def _run_gemini_cli(
 
             _cooldowns.pop((home, model), None)
             _overload_retries.pop((home, model), None)
-            logger.info(f"{label}/{_short_model(model)}: [bold green]ok[/bold green]")
+            logger.info(f"{label}/{_short_model(model)}: [bright_green]ok[/bright_green]")
 
             response = result.stdout.strip()
             for boilerplate in [
@@ -276,7 +282,7 @@ Write your THOUGHTS first (Risk check, Tech check, Red Zone check, Day estimate)
 Then output ===RESULT=== and the structured result.
 """
 
-    logger.info(f"[dim]call1/{_short_model(settings.gemini_model)}[/dim]  [cyan1]{title[:55]}[/cyan1]")
+    logger.info(f"[light_cyan1]call1/{_short_model(settings.gemini_model)}[/light_cyan1]  [{_title_color(project_id)}]{title[:55]}[/{_title_color(project_id)}]")
     response = _run_gemini_cli(prompt, settings.gemini_model, settings.gemini_pool_model, timeout=1200)
     if not response:
         return None
@@ -308,10 +314,11 @@ Then output ===RESULT=== and the structured result.
     days = int(days_match.group(1)) if days_match else 1
     summary = summary_match.group(1).strip() if summary_match else ""
 
+    tc = _title_color(project_id)
     if verdict == "PASS":
-        logger.info(f"[sea_green2]PASS[/sea_green2]  [cyan1]{title[:60]}[/cyan1]  ({days}d)")
+        logger.info(f"[sea_green2]PASS[/sea_green2]  [{tc}]{title[:60]}[/{tc}]  ({days}d)")
     else:
-        logger.info(f"[indian_red]SKIP[/indian_red]  [cyan1]{title[:60]}[/cyan1]")
+        logger.info(f"[red3]SKIP[/red3]  [{tc}]{title[:60]}[/{tc}]")
     return {"verdict": verdict, "days": days, "summary": summary}
 
 
@@ -425,8 +432,8 @@ Output ONLY the BID: and FAIR_PRICE: lines. No other text.
     max_attempts = 2
     for attempt in range(1, max_attempts + 1):
         suffix = f" [dim](attempt {attempt}/{max_attempts})[/dim]" if attempt > 1 else ""
-        logger.info(f"[dim]call2/{_short_model(settings.bid_model)}[/dim]  [cyan1]{title[:55]}[/cyan1]{suffix}")
-        response = _run_gemini_cli(prompt, settings.bid_model, settings.bid_pool_model)
+        logger.info(f"[light_cyan1]call2/{_short_model(settings.bid_model)}[/light_cyan1]  [{_title_color(project_id)}]{title[:55]}[/{_title_color(project_id)}]{suffix}")
+        response = _run_gemini_cli(prompt, settings.bid_model, settings.bid_pool_model, timeout=600)
         if not response:
             return None, None
 
