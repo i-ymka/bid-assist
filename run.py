@@ -966,7 +966,7 @@ async def main():
 
     # Record bot start time
     repo.set_bot_start_time()
-    logger.info(f"Bot started — account: {settings.username} | model: {settings.gemini_model} → {settings.bid_model}")
+    logger.info(f"Bot started — account: {settings.username} | call1: {settings.gemini_model} | call2: {settings.bid_model}")
 
     # Build Telegram application
     try:
