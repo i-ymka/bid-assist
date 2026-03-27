@@ -207,9 +207,9 @@ def _run_gemini_cli(
                         # Flash model — retry up to 3 times with 60s delay (flash overloads tend to be short)
                         key = (home, model)
                         n = _overload_retries.get(key, 0) + 1
-                        if n <= 1:
+                        if n <= 3:
                             _overload_retries[key] = n
-                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — retry {n}/1")
+                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — retry {n}/3")
                             available.append((home, model))
                         else:
                             _overload_retries.pop(key, None)
