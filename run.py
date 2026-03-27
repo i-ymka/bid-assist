@@ -121,20 +121,22 @@ _console_theme = Theme({
     "logging.level.critical":"bold white on red",
     "logging.level.debug":   "dim white",
 })
-_console = Console(theme=_console_theme, force_terminal=True)
+_console = Console(theme=_console_theme, force_terminal=True, width=200)
 
 class _LevelPrefix(logging.Filter):
     """Inject colored level tag into messages (since show_level=False).
     WARN/ERR/CRIT get colored tags. INFO gets blank padding unless it already
     starts with a status word like PASS/SKIP/BID►/LIVE (those carry their own color)."""
     _TAGS = {
-        logging.WARNING:  "[bold yellow]WARN[/bold yellow]  ",
-        logging.ERROR:    "[bold red]ERR! [/bold red] ",
+        logging.WARNING:  "[bright_yellow]WARN[/bright_yellow]  ",
+        logging.ERROR:    "[red1]ERR! [/red1] ",
         logging.CRITICAL: "[bold white on red]CRIT[/bold white on red] ",
     }
+    _ACCT_COLORS = {"ymka": "plum1", "yehia": "cornflower_blue"}
     _BLANK = "      "  # 6 spaces — same width as "WARN  "
     def filter(self, record):
-        acct = f"[dim]{settings.username:<6}[/dim] "
+        acct_color = self._ACCT_COLORS.get(settings.username.lower(), "white")
+        acct = f"[{acct_color}]{settings.username:<6}[/{acct_color}] "
         tag = self._TAGS.get(record.levelno)
         if tag:
             try:
@@ -593,7 +595,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                     # Got result from wait — fall through to use cached_feasibility below
                 else:
                     # We own the slot — run Call 1 exclusively
-                    logger.info(f"[white]  ▸ {project_data['title'][:60]}[/white]")
+                    logger.info(f"[cyan1]  ▸ {project_data['title'][:60]}[/cyan1]")
                     repo.mark_queue_status(project_id, "analyzing")
                     try:
                         raw_feasibility = await loop.run_in_executor(
@@ -690,11 +692,11 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                         None, project_service.get_project_details, project_id
                     )
                     if not fresh_project:
-                        logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  (project closed)")
+                        logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [cyan1]{project_data['title'][:55]}[/cyan1]  (project closed)")
                         continue
                     fresh_bid_count = fresh_project.bid_stats.bid_count
                     if fresh_bid_count > max_bids_now:
-                        logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  ({fresh_bid_count} bids > limit {max_bids_now})")
+                        logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [cyan1]{project_data['title'][:55]}[/cyan1]  ({fresh_bid_count} bids > limit {max_bids_now})")
                         continue
 
                     # Auto-bid: place bid immediately
@@ -800,7 +802,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                             error_lower = bid_result.message.lower()
                             if "preferred freelancer" in error_lower:
                                 # Project became preferred-only after being queued — silent skip
-                                logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  (preferred-only)")
+                                logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [cyan1]{project_data['title'][:55]}[/cyan1]  (preferred-only)")
                             elif "used all" in error_lower or "all of your bids" in error_lower or ("bid" in error_lower and ("limit" in error_lower or "remain" in error_lower or "run out" in error_lower)):
                                 # Disable auto-bid
                                 repo.set_auto_bid(False)
@@ -824,7 +826,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                     # Mark notification as sent in bid_history
                     if notif_sent:
                         repo.mark_notification_sent(project_id)
-                        logger.info(f"[bold green]SENT[/bold green]  {project_data['title'][:55]}  ${result.amount}  ({result.period}d)")
+                        logger.info(f"[royal_blue1]SENT[/royal_blue1]  [cyan1]{project_data['title'][:55]}[/cyan1]  ${result.amount}  ({result.period}d)")
                 else:
                     # Manual mode: store pending bid and send notification with Place Bid button
                     repo.add_pending_bid(
@@ -898,7 +900,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                                     original_keyboard=orig_keyboard,
                                 )
                             )
-                        logger.info(f"[bold bright_magenta]BID[/bold bright_magenta]  {project_data['title'][:55]}  ${result.amount}  ({result.period}d)")
+                        logger.info(f"[royal_blue1]BID[/royal_blue1]  [cyan1]{project_data['title'][:55]}[/cyan1]  ${result.amount}  ({result.period}d)")
             else:
                 # SKIP verdict — send notification if receive_skipped is enabled
                 if repo.get_receive_skipped():
@@ -914,7 +916,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                             url=project_data.get("url", ""),
                             summary=result.summary,
                         )
-                    logger.info(f"[bold red]SKIP[/bold red]  {project_data['title'][:55]}")
+                    logger.info(f"[indian_red]SKIP[/indian_red]  [cyan1]{project_data['title'][:55]}[/cyan1]")
                 else:
                     logger.debug(f"SKIP (muted)  {project_data['title'][:55]}")
 

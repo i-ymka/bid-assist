@@ -199,10 +199,10 @@ def _run_gemini_cli(
                     # TODO: remove once gemini-3.1-pro-preview 503s are resolved by Google.
                     fallback = settings.gemini_overload_fallback_model
                     if fallback and fallback != model:
-                        logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — falling back to {_short_model(fallback)} [dim](TEMPORARY)[/dim]")
+                        logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — falling back to {_short_model(fallback)} [dim](TEMPORARY)[/dim]")
                         available.append((home, fallback))
                     else:
-                        logger.info(f"{label}/{_short_model(model)}: [bold yellow]server overload[/bold yellow] — giving up")
+                        logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — giving up")
                     continue
                 elif error_type == "cancelled":
                     logger.debug("Gemini CLI interrupted")
@@ -300,9 +300,9 @@ Then output ===RESULT=== and the structured result.
     summary = summary_match.group(1).strip() if summary_match else ""
 
     if verdict == "PASS":
-        logger.info(f"[bold green]PASS[/bold green]  {title[:60]}  ({days}d)")
+        logger.info(f"[sea_green2]PASS[/sea_green2]  [cyan1]{title[:60]}[/cyan1]  ({days}d)")
     else:
-        logger.info(f"[bold red]SKIP[/bold red]  {title[:60]}")
+        logger.info(f"[indian_red]SKIP[/indian_red]  [cyan1]{title[:60]}[/cyan1]")
     return {"verdict": verdict, "days": days, "summary": summary}
 
 
@@ -349,7 +349,7 @@ def _calculate_amount(
 
     if target < floor:
         logger.info(
-            f"[bold yellow]NOPE[/bold yellow]  ${target:.0f} < floor ${floor:.0f}  ({days}d × ${effective_rate:.0f}/d)"
+            f"[slate_blue1]NOPE[/slate_blue1]  ${target:.0f} < floor ${floor:.0f}  ({days}d × ${effective_rate:.0f}/d)"
         )
         return None  # signal to caller: skip this project
 
