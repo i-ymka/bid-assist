@@ -585,9 +585,8 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                         if cached_feasibility is not None:
                             break
                     if cached_feasibility is None:
-                        logger.debug(f"Project {project_id}: no Call 1 result after 2 min, skipping")
+                        logger.debug(f"Project {project_id}: no Call 1 result after 2 min — removed from queue, will re-queue on next poll")
                         repo.remove_from_queue(project_id)
-                        repo.add_processed_project(project_id)
                         continue
                     # Got result from wait — fall through to use cached_feasibility below
                 else:
