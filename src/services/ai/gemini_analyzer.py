@@ -291,7 +291,7 @@ Then output ===RESULT=== and the structured result.
             verdict_raw = old_verdict.group(1).upper()
             verdict = "PASS" if verdict_raw == "BID" else "SKIP"
         else:
-            logger.error(f"[Call 1] Could not find VERDICT in response for project {project_id}")
+            logger.error(f"[Call 1] No VERDICT in response: {title[:55]}")
             return None
     else:
         verdict = verdict_match.group(1).upper()
@@ -444,7 +444,7 @@ Output ONLY the BID: and FAIR_PRICE: lines. No other text.
 
         return bid_text, fair_price
 
-    logger.error(f"[Call 2] All {max_attempts} attempts failed for project {project_id}")
+    logger.error(f"[Call 2] All {max_attempts} attempts failed: {title[:55]}")
     return None, None
 
 

@@ -134,20 +134,21 @@ class _LevelPrefix(logging.Filter):
     }
     _BLANK = "      "  # 6 spaces — same width as "WARN  "
     def filter(self, record):
+        acct = f"[dim]{settings.username:<6}[/dim] "
         tag = self._TAGS.get(record.levelno)
         if tag:
             try:
-                record.msg = tag + record.getMessage()
+                record.msg = tag + acct + record.getMessage()
             except Exception:
-                record.msg = tag + str(record.msg)
+                record.msg = tag + acct + str(record.msg)
             record.args = ()
         elif record.levelno == logging.INFO:
             msg = str(record.msg)
             if not msg.startswith("[bold"):
                 try:
-                    record.msg = self._BLANK + record.getMessage()
+                    record.msg = self._BLANK + acct + record.getMessage()
                 except Exception:
-                    record.msg = self._BLANK + msg
+                    record.msg = self._BLANK + acct + msg
                 record.args = ()
         return True
 
@@ -390,12 +391,12 @@ async def polling_loop(repo: ProjectRepository, project_service: ProjectService,
                     owner_display_name=project.owner.display_name or "",
                     is_preferred_only=project.is_preferred_only,
                 )
-                logger.info(f"[cyan]  {project.title[:60]}  [{project.owner.country}][/cyan]")
+                logger.debug(f"[cyan]  {project.title[:60]}  [{project.owner.country}][/cyan]")
                 new_count += 1
 
             pending = repo.get_queue_count("pending")
             if new_count > 0:
-                logger.info(f"Polling: +{new_count} queued, {pending} pending")
+                logger.debug(f"Polling: +{new_count} queued, {pending} pending")
             else:
                 logger.debug(f"Polling: 0 new, {pending} pending")
 
@@ -526,7 +527,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
             # Catches: aged-out projects, budget/blacklist/country/verified/preferred changes.
             skip_reason = _recheck_queue_filters(project_data, repo)
             if skip_reason:
-                logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  ({skip_reason})")
+                logger.debug(f"pre-AI filter: {project_data['title'][:55]} — {skip_reason}")
                 repo.remove_from_queue(project_id)
                 repo.add_processed_project(project_id)
                 continue
@@ -560,7 +561,7 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
             if _raw > 0 and _multiplier > 0:
                 _target_est = _raw * _multiplier
                 if _target_est < _min_daily_rate:
-                    logger.info(f"[bold yellow]NOPE[/bold yellow]  {project_data['title'][:55]}  (${_target_est:.0f} < ${_min_daily_rate}/d)")
+                    logger.debug(f"pre-AI filter: {project_data['title'][:55]} — ${_target_est:.0f} < ${_min_daily_rate}/d")
                     repo.remove_from_queue(project_id)
                     repo.add_processed_project(project_id)
                     # Tell other accounts so they don't waste a Gemini call
