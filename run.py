@@ -99,7 +99,7 @@ from src.services.freelancer import FreelancerClient, ProjectService, BiddingSer
 from src.services.storage import ProjectRepository
 from src.services.telegram.handlers import setup_handlers
 from src.services.telegram.notifier import Notifier
-from src.services.ai.gemini_analyzer import analyze_project, analyze_feasibility, consume_exhaustion_flag, _title_color
+from src.services.ai.gemini_analyzer import analyze_project, analyze_feasibility, consume_exhaustion_flag, _title_color, init_color_db
 from src.services.storage.shared_repository import SharedAnalysisRepository
 from src.models import AIAnalysis
 from src.models.bid import Bid, Verdict
@@ -963,6 +963,7 @@ async def main():
     repo = ProjectRepository()
     shared_repo = SharedAnalysisRepository(Path(settings.db_path).parent / "shared_analysis.db")
     shared_repo.release_stale_claims()  # clean up any in_progress claims left from a previous crashed run
+    init_color_db(shared_repo)
     client = FreelancerClient()
     project_service = ProjectService(client)
     bidding_service = BiddingService(client)

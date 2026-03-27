@@ -35,16 +35,25 @@ def _short_model(model: str) -> str:
 
 
 _TITLE_COLORS = ["plum1", "aquamarine1", "gold1", "light_slate_blue", "yellow3"]
-_color_map: dict[int, str] = {}  # project_id → assigned color
-_color_idx: int = 0              # next color index (round-robin)
+_color_cache: dict[int, str] = {}  # local cache to avoid DB hit on every log line
+_color_repo = None  # set by init_color_db() at startup
+
+
+def init_color_db(repo) -> None:
+    global _color_repo
+    _color_repo = repo
 
 
 def _title_color(project_id: int) -> str:
-    global _color_idx
-    if project_id not in _color_map:
-        _color_map[project_id] = _TITLE_COLORS[_color_idx % len(_TITLE_COLORS)]
-        _color_idx += 1
-    return _color_map[project_id]
+    if project_id in _color_cache:
+        return _color_cache[project_id]
+    if _color_repo is not None:
+        idx = _color_repo.get_or_assign_color(project_id, len(_TITLE_COLORS))
+    else:
+        idx = project_id % len(_TITLE_COLORS)  # fallback (shouldn't happen)
+    color = _TITLE_COLORS[idx]
+    _color_cache[project_id] = color
+    return color
 
 
 # Prompt paths (configurable per-account via PROMPTS_DIR in .env)

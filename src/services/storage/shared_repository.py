@@ -44,6 +44,12 @@ class SharedAnalysisRepository:
                     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_colors (
+                    project_id  INTEGER PRIMARY KEY,
+                    color_index INTEGER NOT NULL
+                )
+            """)
 
     # ------------------------------------------------------------------
     # Public interface — all methods are thread-safe via _lock
@@ -137,6 +143,24 @@ class SharedAnalysisRepository:
                 return removed
         except sqlite3.Error as e:
             logger.error(f"shared_analysis release_stale_claims: {e}")
+            return 0
+
+    def get_or_assign_color(self, project_id: int, palette_size: int) -> int:
+        """Atomically assign the next round-robin color index to a project, or return existing."""
+        try:
+            with self._lock, self._conn:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO project_colors (project_id, color_index) "
+                    "VALUES (?, (SELECT COUNT(*) % ? FROM project_colors))",
+                    (project_id, palette_size),
+                )
+                row = self._conn.execute(
+                    "SELECT color_index FROM project_colors WHERE project_id = ?",
+                    (project_id,),
+                ).fetchone()
+            return row["color_index"] if row else 0
+        except sqlite3.Error as e:
+            logger.error(f"shared_analysis get_or_assign_color({project_id}): {e}")
             return 0
 
     def cleanup_stale(self, max_age_hours: float = 24) -> int:
