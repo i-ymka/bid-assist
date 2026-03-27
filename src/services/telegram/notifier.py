@@ -642,7 +642,7 @@ class Notifier:
 
     async def send_quota_exhausted_notification(self) -> None:
         """Notify user that all Gemini accounts/models have hit quota limits."""
-        await self.send_to_all(
+        await self._send_to_all_chats(
             "⚠️ <b>All Gemini accounts exhausted</b>\n\n"
             "All AI quota limits reached across all configured accounts.\n"
             "Bot will retry automatically. Add more free accounts to <code>GEMINI_HOME_POOL</code>.",
