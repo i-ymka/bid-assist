@@ -108,6 +108,7 @@ class AnalysisResult:
     period: int    # working days
     raw_response: str
     fair_price: Optional[float] = None  # AI's market price estimate from Call 2
+    is_price_nope: bool = False          # True when PASS but market price < floor (min_daily_rate)
 
 
 def _load_prompt(path: Path) -> str:
@@ -169,8 +170,10 @@ def _run_gemini_cli(
     global _all_exhausted_flag
     _init_pool()
 
-    # Build ordered (home_dir, model) pairs: primary only (pool disabled)
+    # Build ordered (home_dir, model) pairs: primary first, then free pool
     pairs = [(_primary_home, primary_model)]
+    for home in _pool_homes:
+        pairs.append((home, pool_model))
 
     now = time.time()
     available = []
@@ -582,6 +585,7 @@ def analyze_project(
             amount=0,
             period=days,
             raw_response="",
+            is_price_nope=True,
         )
 
     # --- Call 2: Bid writing ---

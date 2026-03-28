@@ -1535,6 +1535,36 @@ class ProjectRepository:
             logger.error(f"Failed to set receive_skipped: {e}")
             return False
 
+    def get_notif_mode(self) -> str:
+        """Returns 'all', 'bids_plus', or 'bids'. Migrates legacy receive_skipped key."""
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'notif_mode'"
+            ).fetchone()
+            if row:
+                return row[0] if row[0] in ("all", "bids_plus", "bids") else "all"
+            # Legacy migration: receive_skipped true→all, false→bids
+            legacy = self._conn.execute(
+                "SELECT value FROM runtime_settings WHERE key = 'receive_skipped'"
+            ).fetchone()
+            return "bids" if legacy and legacy[0] == "false" else "all"
+        except sqlite3.Error:
+            return "all"
+
+    def set_notif_mode(self, mode: str) -> bool:
+        """Set notification mode: 'all', 'bids_plus', or 'bids'."""
+        try:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO runtime_settings (key, value, updated_at) "
+                    "VALUES ('notif_mode', ?, CURRENT_TIMESTAMP)",
+                    (mode,),
+                )
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to set notif_mode: {e}")
+            return False
+
     # ===== User Settings Methods (multi-user support) =====
 
     def get_user(self, chat_id: str) -> Optional[dict]:

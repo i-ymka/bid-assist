@@ -911,8 +911,11 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                             )
                         logger.info(f"[royal_blue1]BID[/royal_blue1]  [{_title_color(project_id)}]{project_data['title'][:55]}[/{_title_color(project_id)}]  ${result.amount}  ({result.period}d)")
             else:
-                # SKIP verdict — send notification if receive_skipped is enabled
-                if repo.get_receive_skipped():
+                # SKIP verdict — notify based on mode:
+                # all: BID+SKIP+NOPE, bids_plus: BID+NOPE only, bids: BID only
+                notif_mode = repo.get_notif_mode()
+                send_notif = (notif_mode == "all") or (notif_mode == "bids_plus" and result.is_price_nope)
+                if send_notif:
                     for chat_id in settings.telegram_chat_ids:
                         await notifier.send_skip_notification_to_user(
                             chat_id=chat_id,

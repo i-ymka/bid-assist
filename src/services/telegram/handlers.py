@@ -673,6 +673,9 @@ def _fetch_bid_stats_sync() -> dict:
 
 _MAX_PROPOSAL_LEN = 400
 
+_NOTIF_MODE_LABELS = {"all": "Notifs: All", "bids_plus": "Notifs: Bids+", "bids": "Notifs: Bids"}
+_NOTIF_MODE_CYCLE  = {"all": "bids_plus", "bids_plus": "bids", "bids": "all"}
+
 
 def _build_dashboard_message(data: dict) -> str:
     """Build dashboard summary with counts, percentages, win rate and comparison metrics."""
@@ -1315,7 +1318,7 @@ def _build_settings_message(repo: ProjectRepository) -> str:
     verified_status = "✅ Yes" if repo.is_verified() else "❌ No"
     preferred_status = "✅ Yes" if not repo.skip_preferred_only() else "❌ No"
     auto_bid_status = "✅ Yes" if repo.is_auto_bid() else "❌ No"
-    skipped_status = "✅ Yes" if repo.get_receive_skipped() else "❌ No"
+    notif_mode_label = _NOTIF_MODE_LABELS[repo.get_notif_mode()]
 
     min_daily_rate = repo.get_min_daily_rate()
     tier2_pct = repo.get_rate_tier2_pct()
@@ -1340,7 +1343,7 @@ def _build_settings_message(repo: ProjectRepository) -> str:
         f"• Min daily rate: ${min_daily_rate}/day  (4-7d: ${tier2_abs} · 8+d: ${tier3_abs})\n"
         f"• Bid adjustment: {adj_sign}{bid_adjustment}% from market\n\n"
         f"<b>Notifications:</b>\n"
-        f"• Show skipped: {skipped_status}"
+        f"• Notifications: {notif_mode_label}"
     )
 
 
@@ -1351,7 +1354,7 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
     verified_yn = "✅ Yes" if repo.is_verified() else "❌ No"
     preferred_yn = "✅ Yes" if not repo.skip_preferred_only() else "❌ No"
     auto_bid_yn = "✅ Yes" if repo.is_auto_bid() else "❌ No"
-    skipped_yn = "✅ Yes" if repo.get_receive_skipped() else "❌ No"
+    notif_label = _NOTIF_MODE_LABELS[repo.get_notif_mode()]
 
     min_daily_rate = repo.get_min_daily_rate()
     bid_adjustment = repo.get_bid_adjustment()
@@ -1378,7 +1381,7 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"Max bids: {repo.get_max_bid_count()}", callback_data="settings:max_bids"),
         ],
         [
-            InlineKeyboardButton(f"Show skipped: {skipped_yn}", callback_data="settings:skip_notif"),
+            InlineKeyboardButton(notif_label, callback_data="settings:skip_notif"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -1437,8 +1440,8 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         )
 
     elif action == "skip_notif":
-        current = repo.get_receive_skipped()
-        repo.set_receive_skipped(not current)
+        current_mode = repo.get_notif_mode()
+        repo.set_notif_mode(_NOTIF_MODE_CYCLE[current_mode])
 
         message = _build_settings_message(repo)
         keyboard = _get_settings_keyboard(repo)
