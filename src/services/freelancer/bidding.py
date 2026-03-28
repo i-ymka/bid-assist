@@ -362,28 +362,6 @@ class BiddingService:
             logger.error(f"Exception updating bid {bid_id}: {e}")
             return BidResult(success=False, message=str(e))
 
-    def retract_bid(self, bid_id: int) -> BidResult:
-        """Retract (withdraw) a bid from a project.
-
-        Uses PUT ?action=retract (query param, not JSON body).
-        """
-        try:
-            response = self._client.put(
-                f"/projects/0.1/bids/{bid_id}/",
-                data={},
-                params={"action": "retract"},
-            )
-            if response.get("status") == "success":
-                logger.info(f"Bid {bid_id} retracted successfully")
-                return BidResult(success=True, message="Bid retracted successfully", bid_id=bid_id)
-            else:
-                error_msg = response.get("message", "Unknown error")
-                logger.error(f"Retract bid {bid_id} failed: {error_msg}")
-                return BidResult(success=False, message=error_msg, error_code=response.get("error_code"))
-        except Exception as e:
-            logger.error(f"Exception retracting bid {bid_id}: {e}")
-            return BidResult(success=False, message=str(e))
-
     def get_remaining_bids(self) -> Optional[int]:
         """Get remaining bid count."""
         return self._client.get_remaining_bids()

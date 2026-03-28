@@ -965,14 +965,17 @@ async def schedule_price_corrections(
             if target_usd <= 0:
                 pass  # нет данных avg — не меняем цену
             elif target_usd < floor_usd:
-                # Отзываем бид — рынок ниже нашего минимума
-                result = bidding_service.retract_bid(bid_id)
-                if result.success:
-                    price_line = f"🚫 _Bid retracted \\({minutes}min\\) — market avg below minimum_"
-                    logger.info(f"Bid {bid_id} retracted at {minutes}min: avg ${avg_bid_usd:.0f} → target ${target_usd:.0f} < floor ${floor_usd:.0f}")
-                else:
-                    logger.error(f"Retract bid {bid_id} failed: {result.message}")
-                    break  # no point retrying retract on next cycle
+                # Рынок ниже минимума — ставим нашу минималку вместо ретракта
+                floor_amount_usd = round(floor_usd / 10) * 10
+                floor_amount = round_up_10(from_usd(floor_amount_usd, currency)) if currency != "USD" else floor_amount_usd
+                if floor_amount < current_amount:
+                    result = bidding_service.update_bid(bid_id, floor_amount)
+                    if result.success:
+                        price_line = f"💰 _Price floored \\({minutes}min\\): {escape_markdown_v2(currency)} {escape_markdown_v2(f'{current_amount:.0f}')} → {escape_markdown_v2(f'{floor_amount:.0f}')}_"
+                        logger.info(f"Bid {bid_id} floored at {minutes}min: {current_amount:.0f} → {floor_amount:.0f} {currency} (market ${avg_bid_usd:.0f} below floor ${floor_usd:.0f})")
+                        current_amount = floor_amount
+                    else:
+                        logger.error(f"Floor bid {bid_id} failed: {result.message}")
             else:
                 # Пересчитать новую цену в валюте проекта
                 new_amount_usd = round(target_usd / 10) * 10
@@ -1004,10 +1007,6 @@ async def schedule_price_corrections(
             except Exception as e:
                 if "message is not modified" not in str(e).lower():
                     logger.error(f"Failed to edit message for {project_id}: {e}")
-
-            # Если бид отозван — дальше нет смысла
-            if price_line and "retracted" in price_line:
-                break
 
         except Exception as e:
             logger.error(f"Price correction failed for {project_id} at {delay//60}min: {e}")
