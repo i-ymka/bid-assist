@@ -21,13 +21,10 @@ logger = logging.getLogger(__name__)
 
 _MODEL_SHORT: dict[str, str] = {
     "gemini-3.1-pro-preview":        "pro-3.1",
-    "gemini-3.1-flash-preview":      "flash-3.1",      # TEMPORARY overload fallback for Call 1
+    "gemini-3.1-flash-preview":      "flash-3.1",
     "gemini-3-flash-preview":        "flash-3",
+    "gemini-3-pro-preview":          "pro-3",
     "gemini-3.1-flash-lite-preview": "flash-3.1-lite",
-    "gemini-2.5-pro":                "pro-2.5",
-    "gemini-2.5-flash":              "flash-2.5",
-    "gemini-2.5-flash-lite":         "flash-lite-2.5",
-    "gemini-2.5-flash-lite-preview": "flash-lite-2.5",
 }
 
 def _short_model(model: str) -> str:
@@ -37,6 +34,13 @@ def _short_model(model: str) -> str:
 _TITLE_COLORS = ["plum1", "aquamarine1", "gold1", "light_slate_blue", "yellow3"]
 _color_cache: dict[int, str] = {}  # local cache to avoid DB hit on every log line
 _color_repo = None  # set by init_color_db() at startup
+
+_ACCT_COLORS: dict[str, str] = {"ymka": "plum1", "yehia": "cornflower_blue"}
+
+
+def _acct_color(name: str) -> str:
+    """Return Rich color name for an account, defaulting to white."""
+    return _ACCT_COLORS.get(name.lower(), "white")
 
 
 def init_color_db(repo) -> None:
@@ -75,6 +79,36 @@ _all_exhausted_flag: bool = False
 _pool_initialized: bool = False
 _primary_home: str = ""        # expanded path or "" for default
 _pool_homes: list[str] = []    # expanded paths for free accounts
+
+# Load-based rotation: active CLI subprocess count per home_dir
+_active_counts: dict[str, int] = {}
+_MAX_ACTIVE_PER_ACCOUNT = 5
+
+# Auth-disabled accounts: log once, skip silently afterwards
+_auth_disabled: set = set()
+
+# Per-account lock: only one thread tries a given account at a time.
+# Prevents 5 parallel threads from all hitting the same broken account.
+import threading
+_account_locks: dict[str, threading.Semaphore] = {}
+_account_locks_guard = threading.Lock()  # protects _account_locks dict itself
+
+# Shutdown: flag + track active subprocesses to kill them
+_shutdown_flag: bool = False
+_active_procs: set = set()  # active subprocess.Popen objects
+_active_procs_lock = threading.Lock()
+
+
+def shutdown_gemini():
+    """Signal all running/pending Gemini CLI calls to abort and kill active subprocesses."""
+    global _shutdown_flag
+    _shutdown_flag = True
+    with _active_procs_lock:
+        for proc in _active_procs:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
 
 
 def _init_pool() -> None:
@@ -118,18 +152,49 @@ def _load_prompt(path: Path) -> str:
     return ""
 
 
+
+def _parse_quota_cooldown(stderr: str) -> int:
+    """Parse exact cooldown from Gemini CLI quota error.
+
+    Looks for retryDelayMs (precise) or "reset after Xh Ym Zs" (human-readable).
+    Returns seconds to wait. Falls back to 24h if unparseable.
+    """
+    # Try retryDelayMs first (most precise): retryDelayMs: 82640512.98
+    ms_match = re.search(r'retryDelayMs:\s*([\d.]+)', stderr)
+    if ms_match:
+        return int(float(ms_match.group(1)) / 1000)
+
+    # Try human-readable: "reset after 22h57m20s" or "reset after 5h3m"
+    human_match = re.search(r'reset after\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?', stderr)
+    if human_match:
+        h = int(human_match.group(1) or 0)
+        m = int(human_match.group(2) or 0)
+        s = int(human_match.group(3) or 0)
+        total = h * 3600 + m * 60 + s
+        if total > 0:
+            return total
+
+    return 86400  # fallback: 24h
+
+
 def _classify_cli_error(stderr: str) -> str:
     lower = stderr.lower()
-    # Server capacity issue — no cooldown, just try next account
-    if "no capacity available" in lower or "capacity available for model" in lower:
-        return "overload"
-    # Real quota exhaustion — long cooldown
-    if "resource_exhausted" in lower or "quota" in lower:
+    # Cancelled/interrupted — highest priority
+    if "operation cancelled" in lower or "sigint" in lower or "sigterm" in lower:
+        return "cancelled"
+    # Real quota exhaustion — check BEFORE keychain (stderr often contains both keychain warning + quota error)
+    if "quota_exhausted" in lower or "resource_exhausted" in lower:
         return "quota"
     if "429" in lower or "rate limit" in lower:
         return "overload"
-    if "operation cancelled" in lower or "sigint" in lower or "sigterm" in lower:
-        return "cancelled"
+    # Server capacity issue — no cooldown, just try next account
+    if "no capacity available" in lower or "capacity available for model" in lower:
+        return "overload"
+    # Auth/verification — account needs manual intervention, disable until restart
+    if ("authentication failed" in lower or "invalid credentials" in lower or
+            "verify your account" in lower or "validationrequirederror" in lower or
+            ("credentials" in lower and "not found" in lower and "quota" not in lower)):
+        return "auth"
     return "unknown"
 
 
@@ -141,7 +206,11 @@ def _extract_clean_error(stderr: str) -> str:
         return "Operation cancelled (interrupted)"
     for line in stderr.strip().split("\n"):
         line = line.strip()
-        if line and not line.startswith(("Loaded cached", "YOLO mode", "Attempt", "    at ", "Keychain initialization")):
+        if line and not line.startswith((
+            "Loaded cached", "YOLO mode", "Attempt", "    at ",
+            "Keychain initialization", "MacOS default keychain",
+            "Using FileKeychain",
+        )):
             return line[:200]
     return stderr[:200]
 
@@ -151,27 +220,36 @@ def _run_gemini_cli(
     primary_model: str,
     pool_model: str,
     timeout: int = 600,
+    call_label: str = "",
+    log_title: str = "",
+    project_id: int = 0,
 ) -> Optional[str]:
     """Run Gemini CLI with automatic account pool rotation on quota exhaustion.
-
-    Tries primary account first (pro models), then rotates through free pool accounts.
-    On 429, marks (account, model) in cooldown and tries next.
-    When all accounts exhausted, sets _all_exhausted_flag for analysis_loop to notify user.
 
     Args:
         prompt: Full prompt text
         primary_model: Model to use with the primary (pro) account
         pool_model: Model to use with free pool accounts
         timeout: Subprocess timeout in seconds
+        call_label: e.g. "call1" or "call2" — prefixed to each attempt log
+        log_title: Short title for log lines (e.g. project title)
+        project_id: For colored title in log lines
 
     Returns:
         CLI stdout text, or None if all attempts failed.
     """
     global _all_exhausted_flag
+    if _shutdown_flag:
+        return None
     _init_pool()
 
-    # Build ordered (home_dir, model) pairs: primary first, then free pool
+    # Build ordered (home_dir, model) pairs:
+    # 1. pro account + primary model (e.g. pro-3.1)
+    # 2. pro account + pool model (e.g. flash-3) — separate quota per model
+    # 3. free accounts + pool model
     pairs = [(_primary_home, primary_model)]
+    if pool_model != primary_model:
+        pairs.append((_primary_home, pool_model))
     for home in _pool_homes:
         pairs.append((home, pool_model))
 
@@ -183,7 +261,10 @@ def _run_gemini_cli(
         if now < until:
             remaining = int(until - now)
             label = Path(home).name if home else "default"
-            logger.debug(f"{label}/{model}: cooldown {remaining}s left, skipping")
+            logger.debug(f"{label}/{_short_model(model)}: cooldown {remaining}s left, skipping")
+        elif _active_counts.get(home, 0) >= _MAX_ACTIVE_PER_ACCOUNT:
+            label = Path(home).name if home else "default"
+            logger.debug(f"{label}/{_short_model(model)}: {_active_counts[home]} active (max {_MAX_ACTIVE_PER_ACCOUNT}), skipping")
         else:
             available.append((home, model))
 
@@ -192,22 +273,82 @@ def _run_gemini_cli(
         _all_exhausted_flag = True
         return None
 
-    for home, model in available:
-        env = None
-        if home:
-            import os as _os
-            env = {**_os.environ, "HOME": home}
+    tag = f"[light_cyan1]{call_label}[/light_cyan1]  " if call_label else ""
+    if log_title and project_id:
+        tc = _title_color(project_id)
+        colored_title = f"  [{tc}]{log_title}[/{tc}]"
+    elif log_title:
+        colored_title = f"  {log_title}"
+    else:
+        colored_title = ""
 
+    for home, model in available:
+        if _shutdown_flag:
+            return None
+
+        # Re-check cooldown (another thread may have disabled this account)
+        key = (home, model)
+        if time.time() < _cooldowns.get(key, 0):
+            continue
+
+        label = Path(home).name if home else "pro"
+        short = _short_model(model)
+
+        # Semaphore per account: allow up to _MAX_ACTIVE_PER_ACCOUNT concurrent threads.
+        # If account is broken (auth error), thread sets cooldown — others re-check after acquiring.
+        with _account_locks_guard:
+            if home not in _account_locks:
+                _account_locks[home] = threading.Semaphore(_MAX_ACTIVE_PER_ACCOUNT)
+            lock = _account_locks[home]
+
+        if not lock.acquire(timeout=0.1):
+            # All slots occupied — skip, try next account
+            continue
         try:
-            label = Path(home).name if home else "default"
-            logger.debug(f"[Call] {label}/{_short_model(model)}")
-            result = subprocess.run(
-                ["gemini", "-m", model, "--yolo", "-p", prompt],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
+            # Re-check after acquiring lock (account may have been disabled while waiting)
+            if time.time() < _cooldowns.get((home, model), 0):
+                continue
+
+            env = None
+            if home:
+                import os as _os
+                env = {**_os.environ, "HOME": home}
+
+            logger.info(f"{tag}[dim]{label}/{short}[/dim]{colored_title}")
+            _active_counts[home] = _active_counts.get(home, 0) + 1
+            try:
+                proc = subprocess.Popen(
+                    ["gemini", "-m", model, "--yolo", "-p", prompt],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                    start_new_session=True,
+                )
+                with _active_procs_lock:
+                    _active_procs.add(proc)
+                try:
+                    stdout, stderr = proc.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
+                    raise
+                finally:
+                    with _active_procs_lock:
+                        _active_procs.discard(proc)
+
+                # Build a result-like object for compatibility with existing code
+                class _R:
+                    pass
+                result = _R()
+                result.returncode = proc.returncode
+                result.stdout = stdout
+                result.stderr = stderr
+            finally:
+                _active_counts[home] = max(0, _active_counts.get(home, 1) - 1)
+
+            if _shutdown_flag:
+                return None
 
             if result.returncode < 0:
                 logger.debug(f"Gemini CLI killed by signal {-result.returncode}")
@@ -217,39 +358,42 @@ def _run_gemini_cli(
                 error_type = _classify_cli_error(result.stderr)
                 clean_msg = _extract_clean_error(result.stderr)
 
-                if error_type == "quota":
-                    logger.info(f"{label}/{_short_model(model)}: [bold red]quota exhausted[/bold red] — cooldown 1h — {clean_msg}")
-                    _cooldowns[(home, model)] = time.time() + 3600  # 1h cooldown
+                if error_type == "cancelled":
+                    return None
+                elif error_type == "auth":
+                    _cooldowns[(home, model)] = time.time() + 86400  # 24h = effectively disabled
+                    if home not in _auth_disabled:
+                        _auth_disabled.add(home)
+                        logger.info(f"{tag}{label}/{short}: [bold red]auth error[/bold red] — disabled — {clean_msg}")
+                    continue
+                elif error_type == "quota":
+                    cooldown_sec = _parse_quota_cooldown(result.stderr)
+                    cd_h, cd_m = divmod(cooldown_sec // 60, 60)
+                    logger.info(f"{tag}{label}/{short}: [bold red]quota exhausted[/bold red] — {cd_h}h {cd_m}m")
+                    _cooldowns[(home, model)] = time.time() + cooldown_sec
                     continue
                 elif error_type == "overload":
-                    fallback = settings.gemini_overload_fallback_model
-                    if fallback and fallback != model:
-                        # Pro model — immediate flash fallback (pro overloads last hours, 0/0 retries helped)
-                        # TEMPORARY: TODO remove once gemini-3.1-pro-preview 503s are resolved by Google.
-                        logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — falling back to {_short_model(fallback)} [dim](TEMPORARY)[/dim]")
-                        available.append((home, fallback))
+                    okey = (home, model)
+                    n = _overload_retries.get(okey, 0) + 1
+                    if n <= 3:
+                        _overload_retries[okey] = n
+                        logger.info(f"{tag}{label}/{short}: [bright_yellow]overload[/bright_yellow] — retry {n}/3")
+                        available.append((home, model))
                     else:
-                        # Flash model — retry up to 3 times with 60s delay (flash overloads tend to be short)
-                        key = (home, model)
-                        n = _overload_retries.get(key, 0) + 1
-                        if n <= 3:
-                            _overload_retries[key] = n
-                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — retry {n}/3")
-                            available.append((home, model))
+                        _overload_retries.pop(okey, None)
+                        fallback = settings.gemini_overload_fallback_model
+                        if fallback and fallback != model:
+                            logger.info(f"{tag}{label}/{short}: [bright_yellow]overload[/bright_yellow] — fallback → {_short_model(fallback)}")
+                            available.append((home, fallback))
                         else:
-                            _overload_retries.pop(key, None)
-                            logger.info(f"{label}/{_short_model(model)}: [bright_yellow]server overload[/bright_yellow] — giving up")
+                            logger.info(f"{tag}{label}/{short}: [bright_yellow]overload[/bright_yellow] — giving up")
                     continue
-                elif error_type == "cancelled":
-                    logger.debug("Gemini CLI interrupted")
-                    return None
                 else:
-                    logger.info(f"{label}/{_short_model(model)}: [bold yellow]{clean_msg}[/bold yellow] — trying next")
+                    logger.info(f"{tag}{label}/{short}: [bold yellow]{clean_msg}[/bold yellow]")
                     continue
 
             _cooldowns.pop((home, model), None)
             _overload_retries.pop((home, model), None)
-            logger.info(f"{label}/{_short_model(model)}: [bright_green]ok[/bright_green]")
 
             response = result.stdout.strip()
             for boilerplate in [
@@ -260,8 +404,10 @@ def _run_gemini_cli(
             return response.strip()
 
         except subprocess.TimeoutExpired:
-            logger.error(f"Gemini CLI timed out ({label} / {model}, {timeout}s)")
+            logger.error(f"{tag}{label}/{short}: timed out ({timeout}s)")
             continue
+        finally:
+            lock.release()
 
     logger.error("All Gemini accounts failed")
     _all_exhausted_flag = True
@@ -301,8 +447,7 @@ Write your THOUGHTS first (Risk check, Tech check, Red Zone check, Day estimate)
 Then output ===RESULT=== and the structured result.
 """
 
-    logger.info(f"[light_cyan1]call1/{_short_model(settings.gemini_model)}[/light_cyan1]  [{_title_color(project_id)}]{title[:55]}[/{_title_color(project_id)}]")
-    response = _run_gemini_cli(prompt, settings.gemini_model, settings.gemini_pool_model, timeout=1200)
+    response = _run_gemini_cli(prompt, settings.gemini_model, settings.gemini_pool_model, timeout=1200, call_label="call1", log_title=title[:55], project_id=project_id)
     if not response:
         return None
 
@@ -350,6 +495,8 @@ def _calculate_amount(
     bid_adjustment: int = -10,
     tier2_pct: int = 65,
     tier3_pct: int = 50,
+    account_name: str = "",
+    silent: bool = False,
 ) -> Optional[float]:
     """Deterministic pricing formula.
 
@@ -383,22 +530,38 @@ def _calculate_amount(
         target = midpoint * multiplier
 
     if target < floor:
-        logger.info(
-            f"[slate_blue1]NOPE[/slate_blue1]  ${target:.0f} < floor ${floor:.0f}  ({days}d × ${effective_rate:.0f}/d)"
-        )
+        if not silent:
+            if account_name:
+                ac = _acct_color(account_name)
+                who = f"[{ac}]{account_name}[/{ac}]: "
+            else:
+                who = ""
+            logger.info(
+                f"[slate_blue1]NOPE[/slate_blue1]  {who}${target:.0f} < floor ${floor:.0f}  ({days}d × ${effective_rate:.0f}/d)"
+            )
         return None  # signal to caller: skip this project
 
     # Never bid below client's minimum budget (Freelancer rejects such bids)
     if budget_min_usd and budget_min_usd > 0:
         effective_min = round(budget_min_usd / 10) * 10
         if target < effective_min:
-            logger.info(
-                f"Pricing: target ${target:.0f} raised to budget_min ${effective_min:.0f}"
-            )
+            if not silent:
+                logger.info(
+                    f"Pricing: target ${target:.0f} raised to budget_min ${effective_min:.0f}"
+                )
             target = effective_min
 
     final = round(target / 10) * 10
-    logger.info(f"[bold green]YEP[/bold green]   ${final:.0f}  ({days}d) — writing bid")
+    if not silent:
+        if account_name:
+            ac = _acct_color(account_name)
+            who = f"[{ac}]{account_name}[/{ac}]: "
+        else:
+            who = ""
+        logger.info(
+            f"[bold green]YEP[/bold green]   {who}${final:.0f}  ({days}d)"
+            f"  target ${target:.0f}, floor ${floor:.0f}"
+        )
     return final
 
 
@@ -451,8 +614,7 @@ Output ONLY the BID: and FAIR_PRICE: lines. No other text.
     max_attempts = 2
     for attempt in range(1, max_attempts + 1):
         suffix = f" [dim](attempt {attempt}/{max_attempts})[/dim]" if attempt > 1 else ""
-        logger.info(f"[light_cyan1]call2/{_short_model(settings.bid_model)}[/light_cyan1]  [{_title_color(project_id)}]{title[:55]}[/{_title_color(project_id)}]{suffix}")
-        response = _run_gemini_cli(prompt, settings.bid_model, settings.bid_pool_model, timeout=600)
+        response = _run_gemini_cli(prompt, settings.bid_model, settings.bid_pool_model, timeout=600, call_label="call2", log_title=title[:55], project_id=project_id)
         if not response:
             return None, None
 
@@ -750,4 +912,4 @@ def analyse_weekly_bids(
 Format: plain text, numbered suggestions, no markdown headers.
 """
 
-    return _run_gemini_cli(prompt, settings.gemini_model, settings.gemini_pool_model, timeout=300)
+    return _run_gemini_cli(prompt, settings.gemini_model, settings.gemini_pool_model, timeout=300, call_label="analysis", log_title="weekly analysis")
