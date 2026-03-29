@@ -82,7 +82,8 @@ _pool_homes: list[str] = []    # expanded paths for free accounts
 
 # Load-based rotation: active CLI subprocess count per home_dir
 _active_counts: dict[str, int] = {}
-_MAX_ACTIVE_PER_ACCOUNT = 5
+_MAX_ACTIVE_PRIMARY = 2   # pro account: 2 concurrent (RPM ~5, each call ~2min → safe)
+_MAX_ACTIVE_POOL    = 1   # free accounts: 1 concurrent (lower RPM + verify-account risk)
 
 # Auth-disabled accounts: log once, skip silently afterwards
 _auth_disabled: set = set()
@@ -262,9 +263,10 @@ def _run_gemini_cli(
             remaining = int(until - now)
             label = Path(home).name if home else "default"
             logger.debug(f"{label}/{_short_model(model)}: cooldown {remaining}s left, skipping")
-        elif _active_counts.get(home, 0) >= _MAX_ACTIVE_PER_ACCOUNT:
+        elif _active_counts.get(home, 0) >= (_MAX_ACTIVE_PRIMARY if home == _primary_home else _MAX_ACTIVE_POOL):
             label = Path(home).name if home else "default"
-            logger.debug(f"{label}/{_short_model(model)}: {_active_counts[home]} active (max {_MAX_ACTIVE_PER_ACCOUNT}), skipping")
+            max_for_account = _MAX_ACTIVE_PRIMARY if home == _primary_home else _MAX_ACTIVE_POOL
+            logger.debug(f"{label}/{_short_model(model)}: {_active_counts[home]} active (max {max_for_account}), skipping")
         else:
             available.append((home, model))
 
@@ -294,11 +296,12 @@ def _run_gemini_cli(
         label = Path(home).name if home else "pro"
         short = _short_model(model)
 
-        # Semaphore per account: allow up to _MAX_ACTIVE_PER_ACCOUNT concurrent threads.
+        # Semaphore per account: pro allows 2 concurrent, free pool allows 1.
         # If account is broken (auth error), thread sets cooldown — others re-check after acquiring.
         with _account_locks_guard:
             if home not in _account_locks:
-                _account_locks[home] = threading.Semaphore(_MAX_ACTIVE_PER_ACCOUNT)
+                limit = _MAX_ACTIVE_PRIMARY if home == _primary_home else _MAX_ACTIVE_POOL
+                _account_locks[home] = threading.Semaphore(limit)
             lock = _account_locks[home]
 
         if not lock.acquire(timeout=0.1):
