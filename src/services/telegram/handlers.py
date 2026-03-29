@@ -30,6 +30,34 @@ logger = logging.getLogger(__name__)
 # Conversation states
 WAITING_AMOUNT, WAITING_TEXT, WAITING_SPINNER = range(3)
 
+
+# ── Orchestrator context helpers ──
+# When running under orchestrator, bot_data contains per-account context.
+# When running standalone (old run.py), fall back to global singletons.
+
+def _ctx(context: ContextTypes.DEFAULT_TYPE):
+    """Get repo (AccountRepoAdapter or ProjectRepository) from bot_data.
+
+    Orchestrator mode: returns AccountRepoAdapter wrapping UnifiedRepo.
+    Legacy standalone: returns ProjectRepository.
+    """
+    bd = context.bot_data if context.bot_data else {}
+    if "repo" in bd:
+        from src.services.storage.repo_adapter import AccountRepoAdapter
+        return AccountRepoAdapter(bd["repo"], bd["account_name"])
+    # Legacy fallback: standalone mode
+    return ProjectRepository()
+
+
+def _svc(context: ContextTypes.DEFAULT_TYPE):
+    """Get (bidding_service, project_service) from bot_data. Falls back to legacy globals."""
+    bd = context.bot_data if context.bot_data else {}
+    if "bidding_service" in bd:
+        return bd["bidding_service"], bd["project_service"]
+    # Legacy fallback
+    return get_bidding_service(), get_project_service()
+
+
 # Runtime state (shared across handlers)
 # Budget is persisted in runtime_settings DB; load stored values at import time.
 _runtime_state = {
@@ -45,13 +73,13 @@ try:
 except Exception:
     pass  # DB not ready yet — will use defaults
 
-# Singleton services
+# Singleton services (legacy fallback for standalone mode)
 _bidding_service = None
 _project_service = None
 
 
 def get_bidding_service() -> BiddingService:
-    """Get or create bidding service."""
+    """Get or create bidding service (legacy standalone mode)."""
     global _bidding_service
     if _bidding_service is None:
         client = FreelancerClient()
@@ -60,7 +88,7 @@ def get_bidding_service() -> BiddingService:
 
 
 def get_project_service() -> ProjectService:
-    """Get or create project service."""
+    """Get or create project service (legacy standalone mode)."""
     global _project_service
     if _project_service is None:
         client = FreelancerClient()
@@ -181,7 +209,7 @@ def _build_status_message(repo: ProjectRepository) -> str:
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /status command - show status + control buttons."""
     try:
-        repo = ProjectRepository()
+        repo = _ctx(context)
         message = _build_status_message(repo)
         keyboard = get_control_keyboard()
         await update.message.reply_text(message, parse_mode="HTML", reply_markup=keyboard)
@@ -213,7 +241,7 @@ async def cmd_setbudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         _runtime_state["min_budget"] = min_budget
         _runtime_state["max_budget"] = max_budget
-        ProjectRepository().set_budget_range(min_budget, max_budget)
+        _ctx(context).set_budget_range(min_budget, max_budget)
 
         await update.message.reply_text(
             f"✅ Budget range updated: ${min_budget} - ${max_budget}"
@@ -229,7 +257,7 @@ async def cmd_setbudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_setpoll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /setpoll command - change poll interval."""
-    repo = ProjectRepository()
+    repo = _ctx(context)
     args = context.args
 
     current_interval = repo.get_poll_interval()
@@ -385,7 +413,7 @@ def _classify_project(project_id, project_service, client, my_user_id):
                     winner_reg_date = wr.get("registration_date")
                     winner_earnings_score = rep.get("earnings_score")
             except Exception as e:
-                logger.warning(f"Could not fetch winner profile: {e}")
+                logger.debug(f"Could not fetch winner profile: {e}")
             # Portfolio count (separate API call)
             try:
                 winner_portfolio_count = project_service.get_portfolio_count(winner_user_id)
@@ -434,20 +462,30 @@ _stats_cache = {"data": None, "ts": None}
 _STATS_CACHE_TTL = 1800  # 30 minutes
 
 
-def _fetch_bid_stats_sync() -> dict:
-    """Fetch ALL user bids from Freelancer API, classify, build stats.
+def _fetch_bid_stats_sync(period: str = "alltime") -> dict:
+    """Fetch user bids from Freelancer API, classify, build stats.
+
+    Args:
+        period: "weekly" to only process last 7 days, "alltime" for everything.
 
     Uses in-memory cache (30 min) + DB outcome cache.
     Source: Freelancer API (includes manual bids), NOT bid_history.
     """
+    cache_key = f"{period}"
     now = datetime.now()
     if (
         _stats_cache["data"] is not None
+        and _stats_cache.get("period") == period
         and _stats_cache["ts"]
         and (now - _stats_cache["ts"]).total_seconds() < _STATS_CACHE_TTL
     ):
         logger.info("Bidstats: returning cached result (age: %ds)", int((now - _stats_cache["ts"]).total_seconds()))
         return _stats_cache["data"]
+
+    # For weekly: skip bids older than 7 days (no need to classify them)
+    weekly_cutoff_ts = None
+    if period == "weekly":
+        weekly_cutoff_ts = (now - timedelta(days=7)).timestamp()
 
     bidding_service = get_bidding_service()
     project_service = ProjectService()
@@ -513,11 +551,16 @@ def _fetch_bid_stats_sync() -> dict:
         project_id = bid.get("project_id")
         if not project_id:
             continue
+
+        # Skip old bids when in weekly mode (no need to classify them)
+        submit_ts = bid.get("submitdate", 0)
+        if weekly_cutoff_ts and submit_ts and submit_ts < weekly_cutoff_ts:
+            continue
+
         try:
             # Data from API bid object
             our_amount = bid.get("amount", 0) or 0
             our_proposal = bid.get("description", "") or ""
-            submit_ts = bid.get("submitdate", 0)
             award_status = bid.get("award_status", "")
 
             # Project details from bid_history DB (bot-placed bids)
@@ -667,6 +710,7 @@ def _fetch_bid_stats_sync() -> dict:
 
     _stats_cache["data"] = result
     _stats_cache["ts"] = datetime.now()
+    _stats_cache["period"] = period
 
     return result
 
@@ -1094,7 +1138,7 @@ async def handle_bidstats_callback(update: Update, context: ContextTypes.DEFAULT
     try:
         import asyncio
         loop = asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, _fetch_bid_stats_sync)
+        data = await loop.run_in_executor(None, _fetch_bid_stats_sync, period)
 
         if data["total"] == 0:
             await query.edit_message_text("No bids found.")
@@ -1213,7 +1257,8 @@ _SPINNER_CONFIG = {
     "poll":       ("Poll Interval",         "s",       30, 3600, 30,  60),
     "budget_min": ("Min Budget",            "$",       30, 10000, 50, 200),
     "budget_max": ("Max Budget",            "$",       30, 10000, 50, 200),
-    "proj_age":   ("Max Project Age",       "h",      0.5, 12,   0.5,  1),
+    "proj_age":   ("Max Project Age",       "min",    10, 720,  10,  60),
+    "bid_delay":  ("Bid Delay",             "min",     0,  10,   1,   5),
     "tier2_pct":  ("Rate: 4-7 day projects", "%",      30, 100,   5,  10),
     "tier3_pct":  ("Rate: 8+ day projects",  "%",      30, 100,   5,  10),
 }
@@ -1227,7 +1272,8 @@ def _spinner_get(repo: "ProjectRepository", key: str) -> int:
     if key == "poll":       return repo.get_poll_interval()
     if key == "budget_min": return state["min_budget"]
     if key == "budget_max": return state["max_budget"]
-    if key == "proj_age":  return repo.get_max_project_age()
+    if key == "proj_age":  return int(repo.get_max_project_age() * 60)
+    if key == "bid_delay": return repo.get_bid_delay()
     if key == "tier2_pct": return repo.get_rate_tier2_pct()
     if key == "tier3_pct": return repo.get_rate_tier3_pct()
     return 0
@@ -1245,7 +1291,8 @@ def _spinner_set(repo: "ProjectRepository", key: str, value: int) -> None:
     elif key == "budget_max":
         state["max_budget"] = value
         repo.set_budget_range(state["min_budget"], value)
-    elif key == "proj_age":   repo.set_max_project_age(value)
+    elif key == "proj_age":   repo.set_max_project_age(value / 60)
+    elif key == "bid_delay":  repo.set_bid_delay(int(value))
     elif key == "tier2_pct":  repo.set_rate_tier2_pct(int(value))
     elif key == "tier3_pct":  repo.set_rate_tier3_pct(int(value))
 
@@ -1331,8 +1378,7 @@ def _build_settings_message(repo: ProjectRepository) -> str:
         f"⚙️ <b>Settings</b>\n\n"
         f"<b>Filters:</b>\n"
         f"• Budget: ${state['min_budget']} – ${state['max_budget']}\n"
-        f"• Poll: every {poll_min}m ({poll_sec}s)\n"
-        f"• Max project age: {repo.get_max_project_age():.1f}h\n"
+        f"• Max project age: {int(repo.get_max_project_age() * 60)}min\n"
         f"• Languages: {', '.join(settings.allowed_languages) if settings.allowed_languages else 'all'}\n"
         f"• Blocked currencies: {', '.join(settings.blocked_currencies) if settings.blocked_currencies else 'none'}\n\n"
         f"<b>Show projects:</b>\n"
@@ -1340,6 +1386,7 @@ def _build_settings_message(repo: ProjectRepository) -> str:
         f"• Preferred-only: {preferred_status}\n\n"
         f"<b>Bidding:</b>\n"
         f"• Auto-bid: {auto_bid_status}\n"
+        f"• Bid delay: {repo.get_bid_delay()}min\n"
         f"• Min daily rate: ${min_daily_rate}/day  (4-7d: ${tier2_abs} · 8+d: ${tier3_abs})\n"
         f"• Bid adjustment: {adj_sign}{bid_adjustment}% from market\n\n"
         f"<b>Notifications:</b>\n"
@@ -1365,20 +1412,22 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(f"💰 Min: ${state['min_budget']}", callback_data="settings:budget_min"),
             InlineKeyboardButton(f"💰 Max: ${state['max_budget']}", callback_data="settings:budget_max"),
-            InlineKeyboardButton(f"⏱ Poll: {poll_display}", callback_data="settings:poll"),
-            InlineKeyboardButton(f"🕐 Age: {repo.get_max_project_age():.1f}h", callback_data="settings:proj_age"),
+        ],
+        [
+            InlineKeyboardButton(f"Min rate: ${min_daily_rate}/day", callback_data="settings:daily_rate"),
+            InlineKeyboardButton(f"Bid adj: {adj_sign}{bid_adjustment}%", callback_data="settings:bid_adj"),
+        ],
+        [
+            InlineKeyboardButton(f"Auto-bid: {auto_bid_yn}", callback_data="settings:auto_bid"),
+            InlineKeyboardButton(f"Max bids: {repo.get_max_bid_count()}", callback_data="settings:max_bids"),
         ],
         [
             InlineKeyboardButton(f"Verified: {verified_yn}", callback_data="settings:verified"),
             InlineKeyboardButton(f"Preferred: {preferred_yn}", callback_data="settings:skip_preferred"),
         ],
         [
-            InlineKeyboardButton(f"Auto-bid: {auto_bid_yn}", callback_data="settings:auto_bid"),
-            InlineKeyboardButton(f"Min rate: ${min_daily_rate}/day", callback_data="settings:daily_rate"),
-        ],
-        [
-            InlineKeyboardButton(f"Bid adj: {adj_sign}{bid_adjustment}%", callback_data="settings:bid_adj"),
-            InlineKeyboardButton(f"Max bids: {repo.get_max_bid_count()}", callback_data="settings:max_bids"),
+            InlineKeyboardButton(f"🕐 Age: {int(repo.get_max_project_age() * 60)}min", callback_data="settings:proj_age"),
+            InlineKeyboardButton(f"⏳ Delay: {repo.get_bid_delay()}min", callback_data="settings:bid_delay"),
         ],
         [
             InlineKeyboardButton(notif_label, callback_data="settings:skip_notif"),
@@ -1389,7 +1438,7 @@ def _get_settings_keyboard(repo: ProjectRepository) -> InlineKeyboardMarkup:
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /settings command - show all bot settings with interactive controls."""
-    repo = ProjectRepository()
+    repo = _ctx(context)
     message = _build_settings_message(repo)
     keyboard = _get_settings_keyboard(repo)
     await update.message.reply_text(message, parse_mode="HTML", reply_markup=keyboard)
@@ -1400,7 +1449,7 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
     query = update.callback_query
     await query.answer()
 
-    repo = ProjectRepository()
+    repo = _ctx(context)
     action = query.data.split(":")[1]
 
     if action == "verified":
@@ -1453,7 +1502,7 @@ async def handle_spinner_callback(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
 
-    repo = ProjectRepository()
+    repo = _ctx(context)
     parts = query.data.split(":")  # ["spinner", key, delta] or ["spinner", "done"]
 
     if parts[1] == "done":
@@ -1489,7 +1538,7 @@ async def handle_spinput_callback(update: Update, context: ContextTypes.DEFAULT_
 
     key = query.data.split(":")[1]
     label, unit, min_val, max_val, _, _ = _SPINNER_CONFIG[key]
-    repo = ProjectRepository()
+    repo = _ctx(context)
     current = _spinner_get(repo, key)
     sign = "+" if current > 0 else ""
 
@@ -1534,7 +1583,7 @@ async def receive_spinner_value(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(f"❌ Must be between {min_val} and {max_val}", parse_mode="HTML")
         return WAITING_SPINNER
 
-    repo = ProjectRepository()
+    repo = _ctx(context)
     _spinner_set(repo, key, value)
 
     context.user_data.pop("spinner_key", None)
@@ -1559,7 +1608,7 @@ async def handle_spincancel_callback(update: Update, context: ContextTypes.DEFAU
     context.user_data.pop("spinner_key", None)
     context.user_data.pop("spinner_message_id", None)
 
-    repo = ProjectRepository()
+    repo = _ctx(context)
     current = _spinner_get(repo, key)
     await query.edit_message_text(
         _build_spinner_message(key, current),
@@ -1575,7 +1624,7 @@ async def cmd_setverified(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Usage: /setverified on|off
            /setverified (show current)
     """
-    repo = ProjectRepository()
+    repo = _ctx(context)
     args = context.args
 
     current = repo.is_verified()
@@ -1622,7 +1671,7 @@ async def cmd_setverified(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def get_control_keyboard() -> InlineKeyboardMarkup:
     """Get control panel keyboard based on current state."""
-    repo = ProjectRepository()
+    repo = _ctx(context)
     is_paused = repo.is_paused()
 
     if is_paused:
@@ -1643,7 +1692,7 @@ async def handle_control_callback(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
 
-    repo = ProjectRepository()
+    repo = _ctx(context)
     action = query.data.split(":")[1]
 
     if action == "start":
@@ -1672,7 +1721,7 @@ async def handle_edit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
     # Check if bid still exists
-    repo = ProjectRepository()
+    repo = _ctx(context)
     bid_data = repo.get_pending_bid(project_id)
     if not bid_data:
         await query.message.reply_text("❌ Bid data expired.")
@@ -1713,7 +1762,7 @@ async def receive_new_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return WAITING_AMOUNT
 
     # Update the pending bid
-    repo = ProjectRepository()
+    repo = _ctx(context)
     bid_data = repo.update_pending_bid(project_id, amount=new_amount)
     if not bid_data:
         await update.message.reply_text("❌ Bid data expired.")
@@ -1765,7 +1814,7 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     # Check if bid still exists
-    repo = ProjectRepository()
+    repo = _ctx(context)
     bid_data = repo.get_pending_bid(project_id)
     if not bid_data:
         await query.message.reply_text("❌ Bid data expired.")
@@ -1807,7 +1856,7 @@ async def receive_new_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_TEXT
 
     # Update the pending bid
-    repo = ProjectRepository()
+    repo = _ctx(context)
     bid_data = repo.update_pending_bid(project_id, description=new_text)
     if not bid_data:
         await update.message.reply_text("❌ Bid data expired.")
@@ -1867,7 +1916,7 @@ async def handle_ask_bid_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # Get project data from queue
-    repo = ProjectRepository()
+    repo = _ctx(context)
     project_data = repo.get_project_from_queue(project_id)
     if not project_data:
         await query.edit_message_text(
@@ -2030,7 +2079,7 @@ async def handle_bid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # Get pending bid data (this is the CURRENT data - might have been edited by teammate)
-    repo = ProjectRepository()
+    repo = _ctx(context)
     bid_data = repo.get_pending_bid(project_id)
     if not bid_data:
         await query.answer("❌ Bid data expired", show_alert=True)
@@ -2316,7 +2365,7 @@ async def handle_bid_force_callback(update: Update, context: ContextTypes.DEFAUL
         await query.answer("❌ Invalid data", show_alert=True)
         return
 
-    repo = ProjectRepository()
+    repo = _ctx(context)
     bid_data = repo.get_pending_bid(project_id)
     if not bid_data:
         await query.answer("❌ Bid data expired", show_alert=True)
