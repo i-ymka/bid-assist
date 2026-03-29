@@ -31,7 +31,7 @@ def _short_model(model: str) -> str:
     return _MODEL_SHORT.get(model, model)
 
 
-_TITLE_COLORS = ["plum1", "aquamarine1", "gold1", "light_slate_blue", "yellow3"]
+_TITLE_COLORS = ["bright_red", "orange1", "gold1", "chartreuse1", "spring_green1", "cyan1", "deep_sky_blue1", "hot_pink"]
 _color_cache: dict[int, str] = {}  # local cache to avoid DB hit on every log line
 _color_repo = None  # set by init_color_db() at startup
 
