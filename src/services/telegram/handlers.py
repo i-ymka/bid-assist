@@ -670,6 +670,8 @@ def _fetch_bid_stats_sync(period: str = "alltime") -> dict:
     price_diffs_pct = []
     proposal_diffs = []
     review_diffs = []
+    my_ttbs_losses = []
+    win_ttbs = []
     my_reviews = my_profile.get("reviews")
 
     for loss in losses_visible:
@@ -686,6 +688,18 @@ def _fetch_bid_stats_sync(period: str = "alltime") -> dict:
         if winner_reviews is not None and my_reviews is not None:
             review_diffs.append(my_reviews - winner_reviews)
 
+        my_ttb = loss.get("my_time_to_bid_sec")
+        win_ttb = loss.get("winner_time_to_bid_sec")
+        if my_ttb is not None and my_ttb >= 0:
+            my_ttbs_losses.append(my_ttb)
+        if win_ttb is not None and win_ttb >= 0:
+            win_ttbs.append(win_ttb)
+
+    my_ttbs_wins = [
+        w["my_time_to_bid_sec"] for w in wins
+        if w.get("my_time_to_bid_sec") is not None and w["my_time_to_bid_sec"] >= 0
+    ]
+
     comparison = {}
     if price_diffs_pct:
         comparison["avg_price_diff_pct"] = sum(price_diffs_pct) / len(price_diffs_pct)
@@ -693,6 +707,12 @@ def _fetch_bid_stats_sync(period: str = "alltime") -> dict:
         comparison["avg_proposal_diff_chars"] = sum(proposal_diffs) / len(proposal_diffs)
     if review_diffs:
         comparison["avg_review_diff"] = sum(review_diffs) / len(review_diffs)
+    if my_ttbs_losses:
+        comparison["avg_my_ttb_losses_sec"] = sum(my_ttbs_losses) / len(my_ttbs_losses)
+    if win_ttbs:
+        comparison["avg_winner_ttb_sec"] = sum(win_ttbs) / len(win_ttbs)
+    if my_ttbs_wins:
+        comparison["avg_my_ttb_wins_sec"] = sum(my_ttbs_wins) / len(my_ttbs_wins)
 
     logger.info(f"Bidstats: {len(api_bids)} bids, {classify_calls} classify calls, {error_count} errors")
 
@@ -719,6 +739,16 @@ _MAX_PROPOSAL_LEN = 400
 
 _NOTIF_MODE_LABELS = {"all": "Notifs: All", "bids_plus": "Notifs: Bids+", "bids": "Notifs: Bids"}
 _NOTIF_MODE_CYCLE  = {"all": "bids_plus", "bids_plus": "bids", "bids": "all"}
+
+
+def _fmt_ttb(secs) -> str:
+    """Format seconds-since-posting as human-readable duration."""
+    if secs is None:
+        return "?"
+    secs = max(0, int(secs))
+    if secs < 3600:
+        return f"{secs // 60}min"
+    return f"{secs // 3600}h {(secs % 3600) // 60}m"
 
 
 def _build_dashboard_message(data: dict) -> str:
@@ -782,6 +812,25 @@ def _build_dashboard_message(data: dict) -> str:
             else:
                 lines.append(f"⭐ You have <b>{abs(rev_diff):.0f} fewer</b> reviews")
 
+        my_ttb_loss = comp.get("avg_my_ttb_losses_sec")
+        win_ttb = comp.get("avg_winner_ttb_sec")
+        my_ttb_win = comp.get("avg_my_ttb_wins_sec")
+        if my_ttb_loss is not None or win_ttb is not None:
+            you_fmt = _fmt_ttb(my_ttb_loss) if my_ttb_loss is not None else "?"
+            win_fmt = _fmt_ttb(win_ttb) if win_ttb is not None else "?"
+            timing_line = f"⏱ Bid timing: you <b>{you_fmt}</b> | winner <b>{win_fmt}</b>"
+            if my_ttb_loss is not None and win_ttb is not None:
+                delta_sec = int(my_ttb_loss - win_ttb)
+                if delta_sec > 60:
+                    timing_line += f" → <b>{delta_sec // 60}min later</b>"
+                elif delta_sec < -60:
+                    timing_line += f" → <b>{abs(delta_sec) // 60}min earlier</b>"
+                else:
+                    timing_line += " → same time"
+            lines.append(timing_line)
+        if my_ttb_win is not None:
+            lines.append(f"🏆 Winning bids: avg <b>{_fmt_ttb(my_ttb_win)}</b> after posting")
+
     return "\n".join(lines)
 
 
@@ -834,18 +883,10 @@ def _build_loss_card(loss: dict, is_sealed: bool = False, my_profile: dict = Non
         lines.append(f"<blockquote>{our_proposal}</blockquote>")
 
     # — TIMING —
-    def _fmt_time(secs):
-        if secs is None:
-            return None
-        secs = max(0, secs)
-        if secs < 3600:
-            return f"{secs // 60}min"
-        return f"{secs // 3600}h {(secs % 3600) // 60}m"
-
-    my_ttb = _fmt_time(loss.get("my_time_to_bid_sec"))
-    win_ttb = _fmt_time(loss.get("winner_time_to_bid_sec"))
-    if my_ttb or win_ttb:
-        timing_line = f"⏱ You: {my_ttb or '?'} | Winner: {win_ttb or '?'}"
+    my_ttb_s = loss.get("my_time_to_bid_sec")
+    win_ttb_s = loss.get("winner_time_to_bid_sec")
+    if my_ttb_s is not None or win_ttb_s is not None:
+        timing_line = f"⏱ You: {_fmt_ttb(my_ttb_s)} | Winner: {_fmt_ttb(win_ttb_s)}"
         lines.append(timing_line)
 
     # — WINNER —
