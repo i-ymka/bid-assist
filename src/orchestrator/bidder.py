@@ -118,16 +118,30 @@ async def _process_account_bid(
 
         # Check auto-bid setting
         if not repo.is_auto_bid(account_name):
+            # Fetch fresh bid stats so manual notification shows current market data
+            bid_count_display = project.get("bid_count", 0)
+            avg_bid_display = avg_bid
+            project_service = services.get("project_service")
+            if project_service:
+                try:
+                    fresh = await loop.run_in_executor(None, project_service.get_project_details, pid)
+                    if fresh and fresh.bid_stats:
+                        bid_count_display = fresh.bid_stats.bid_count
+                        if fresh.bid_stats.bid_avg:
+                            avg_bid_display = fresh.bid_stats.bid_avg
+                except Exception:
+                    pass
+
             # Stage for manual Telegram button
             repo.add_pending_bid(
                 account_name, pid,
                 amount=amount, period=days, description=bid_text,
                 title=title, currency=currency, url=project.get("url", ""),
-                bid_count=project.get("bid_count", 0),
+                bid_count=bid_count_display,
                 summary=summary,
                 budget_min=budget_min, budget_max=budget_max,
                 client_country=project.get("client_country", ""),
-                avg_bid=avg_bid,
+                avg_bid=avg_bid_display,
             )
             # Send notification via Telegram
             notifier = services.get("notifier")
@@ -141,8 +155,8 @@ async def _process_account_bid(
                         budget_max=budget_max,
                         currency=currency,
                         client_country=project.get("client_country", ""),
-                        bid_count=project.get("bid_count", 0),
-                        avg_bid=avg_bid,
+                        bid_count=bid_count_display,
+                        avg_bid=avg_bid_display,
                         url=project.get("url", ""),
                         summary=summary,
                         bid_text=bid_text,
