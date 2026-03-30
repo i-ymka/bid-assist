@@ -189,14 +189,15 @@ def _classify_cli_error(stderr: str) -> str:
     # Cancelled/interrupted — highest priority
     if "operation cancelled" in lower or "sigint" in lower or "sigterm" in lower:
         return "cancelled"
+    # Server capacity issue — check BEFORE resource_exhausted (capacity errors also contain resource_exhausted)
+    # Classified separately so we skip retries and go straight to fallback model
+    if "no capacity available" in lower or "capacity available for model" in lower:
+        return "no_capacity"
+    if "429" in lower or "rate limit" in lower:
+        return "overload"
     # Real quota exhaustion — check BEFORE keychain (stderr often contains both keychain warning + quota error)
     if "quota_exhausted" in lower or "resource_exhausted" in lower:
         return "quota"
-    if "429" in lower or "rate limit" in lower:
-        return "overload"
-    # Server capacity issue — no cooldown, just try next account
-    if "no capacity available" in lower or "capacity available for model" in lower:
-        return "overload"
     # Auth/verification — account needs manual intervention, disable until restart
     if ("authentication failed" in lower or "invalid credentials" in lower or
             "verify your account" in lower or "validationrequirederror" in lower or
@@ -396,6 +397,14 @@ def _run_gemini_cli(
                     logger.info(f"{tag}{label}/{short}: [bold red]quota exhausted[/bold red] — {cd_h}h {cd_m}m{fallback_note}  {clean_msg}")
                     logger.debug(f"quota stderr: {result.stderr[:500]}")
                     _cooldowns[(home, model)] = time.time() + cooldown_sec
+                    continue
+                elif error_type == "no_capacity":
+                    fallback = settings.gemini_overload_fallback_model
+                    if fallback and fallback != model:
+                        logger.info(f"{tag}{label}/{short}: [bright_yellow]no capacity[/bright_yellow] → {_short_model(fallback)}")
+                        available.append((home, fallback))
+                    else:
+                        logger.info(f"{tag}{label}/{short}: [bright_yellow]no capacity[/bright_yellow] — no fallback, skip")
                     continue
                 elif error_type == "overload":
                     elapsed = time.time() - t0
