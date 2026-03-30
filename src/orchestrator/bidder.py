@@ -71,11 +71,15 @@ async def _process_account_bid(
             tier2_pct=tier2,
             tier3_pct=tier3,
             account_name=account_name,
+            silent=True,
         )
 
+        floor_usd = days * min_rate
         if amount_usd is None:
-            # Price below floor — NOPE
-            logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  (below floor)")
+            logger.info(
+                f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]"
+                f"  (floor ${floor_usd:.0f}, {days}d × ${min_rate:.0f}/d)"
+            )
             notif_mode = repo.get_notif_mode(account_name)
             if notif_mode in ("all", "bids_plus"):
                 notifier = services.get("notifier")
@@ -94,6 +98,11 @@ async def _process_account_bid(
                         )
             repo.mark_price_fail(pid, account_name)
             return
+
+        logger.info(
+            f"[bold green]YEP[/bold green]   [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]"
+            f"  ${amount_usd:.0f}  ({days}d)  floor ${floor_usd:.0f}"
+        )
 
         # Convert back to project currency
         if currency != "USD":
@@ -116,6 +125,7 @@ async def _process_account_bid(
             amount,
             days,
             owner_name,
+            account_name,
         )
 
         if not bid_text:
@@ -212,6 +222,8 @@ async def _process_account_bid(
                                     original_text=orig_text,
                                     original_keyboard=orig_keyboard,
                                     delay=delay,
+                                    account_name=account_name,
+                                    title=title,
                                 ))
             logger.info(f"[royal_blue1]SENT[/royal_blue1]  [{ac}]{account_name}[/{ac}]: ${amount:.0f}  ({days}d)  [{tc}]{title[:55]}[/{tc}]  (manual)")
             return
@@ -260,6 +272,7 @@ async def _process_account_bid(
                 "client_country": fresh.owner.country,
                 "time_submitted": fresh.time_submitted,
                 "is_preferred_only": fresh.is_preferred_only,
+                "nda_required": fresh.nda_required,
                 "language": fresh.language,
                 "skill_ids_str": ",".join(str(sid) for sid in fresh.skill_ids),
             }
@@ -302,7 +315,7 @@ async def _process_account_bid(
                 old_amt = amount if currency == "USD" else amount_usd
                 amount_usd = fresh_amount
                 amount = round_up_10(from_usd(amount_usd, currency)) if currency != "USD" else amount_usd
-                logger.info(f"      [{ac}]{account_name}[/{ac}]: price adjusted ${old_amt:.0f} → ${amount:.0f} (fresh avg_bid)")
+                logger.info(f"[{ac}]{account_name}[/{ac}]: [{tc}]{title[:45]}[/{tc}]  price adjusted ${old_amt:.0f} → ${amount:.0f} (fresh avg_bid)")
 
         # Auto-bid: place bid via Freelancer API
         from src.models import Bid
@@ -390,6 +403,8 @@ async def _process_account_bid(
                                 min_daily_rate=repo.get_min_daily_rate(account_name),
                                 original_text=orig_text,
                                 original_keyboard=orig_keyboard,
+                                account_name=account_name,
+                                title=title,
                             )
                         )
 
@@ -399,7 +414,9 @@ async def _process_account_bid(
             repo.mark_bid_placed(pid, account_name)  # don't retry
             error_lower = bid_result.message.lower()
 
-            if "preferred freelancer" in error_lower:
+            if "nda" in error_lower or "sign the nda" in error_lower:
+                logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  (NDA required)")
+            elif "preferred freelancer" in error_lower:
                 logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  (preferred-only)")
             elif "used all" in error_lower or "all of your bids" in error_lower or ("bid" in error_lower and ("limit" in error_lower or "remain" in error_lower or "run out" in error_lower)):
                 repo.set_auto_bid(account_name, False)

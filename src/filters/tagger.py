@@ -47,6 +47,10 @@ class ProjectTagger:
         """Check all filters for one account. Returns rejection reason or None if passes."""
         name = acc.name
 
+        # 0. NDA / IP restriction — skip before any AI or processing
+        if p.get("nda_required"):
+            return "NDA required"
+
         # 1. Budget
         budget_max = p.get("budget_max") or 0
         bmin, bmax = self._repo.get_budget_range(name)

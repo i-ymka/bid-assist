@@ -231,6 +231,7 @@ def _run_gemini_cli(
     log_title: str = "",
     project_id: int = 0,
     required_pattern: Optional[str] = None,
+    account_name: str = "",
 ) -> Optional[str]:
     """Run Gemini CLI with automatic account pool rotation on quota exhaustion.
 
@@ -287,6 +288,11 @@ def _run_gemini_cli(
         return None
 
     tag = f"[light_cyan1]{call_label}[/light_cyan1]  " if call_label else ""
+    if account_name:
+        ac = _acct_color(account_name)
+        who = f"[{ac}]{account_name}[/{ac}]  "
+    else:
+        who = ""
     if log_title and project_id:
         tc = _title_color(project_id)
         colored_title = f"  [{tc}]{log_title}[/{tc}]"
@@ -330,7 +336,7 @@ def _run_gemini_cli(
                 import os as _os
                 env = {**_os.environ, "HOME": home}
 
-            logger.info(f"{tag}[dim]{label}/{short}[/dim]{colored_title}")
+            logger.info(f"{tag}{who}[dim]{label}/{short}[/dim]{colored_title}")
             t0 = time.time()
             _active_counts[home] = _active_counts.get(home, 0) + 1
             try:
@@ -617,6 +623,7 @@ def write_bid(
     amount: float,
     period: int,
     owner_name: str = "",
+    account_name: str = "",
 ) -> tuple[Optional[str], Optional[float]]:
     """Call 2: Write bid text for a project that passed feasibility.
 
@@ -658,7 +665,7 @@ Output ONLY the BID: and FAIR_PRICE: lines. No other text.
     max_attempts = 2
     for attempt in range(1, max_attempts + 1):
         suffix = f" [dim](attempt {attempt}/{max_attempts})[/dim]" if attempt > 1 else ""
-        response = _run_gemini_cli(prompt, settings.bid_model, settings.bid_pool_model, timeout=600, call_label="call2", log_title=title[:55], project_id=project_id)
+        response = _run_gemini_cli(prompt, settings.bid_model, settings.bid_pool_model, timeout=600, call_label="call2", log_title=title[:55], project_id=project_id, account_name=account_name)
         if not response:
             return None, None
 

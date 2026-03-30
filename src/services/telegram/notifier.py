@@ -856,6 +856,8 @@ async def schedule_bid_update(
     original_text: str = None,
     original_keyboard: InlineKeyboardMarkup = None,
     delay: int = 60,
+    account_name: str = "",
+    title: str = "",
 ):
     """Fetch updated bid stats after a delay and edit the bids line in-place.
 
@@ -902,10 +904,13 @@ async def schedule_bid_update(
                         reply_markup=original_keyboard,
                         disable_web_page_preview=True,
                     )
+                    from src.services.ai.gemini_analyzer import _acct_color
+                    ac = _acct_color(account_name) if account_name else "white"
+                    who = f"[{ac}]{account_name}[/{ac}]: {title[:35]}  " if account_name else ""
                     if rank:
-                        logger.info(f"      rank #{rank} of {total} bids, avg ${avg:.0f}")
+                        logger.info(f"{who}rank #{rank} of {total} bids, avg ${avg:.0f}")
                     else:
-                        logger.info(f"      {total} bids, avg ${avg:.0f}")
+                        logger.info(f"{who}{total} bids, avg ${avg:.0f}")
                 except Exception as edit_err:
                     if "message is not modified" not in str(edit_err).lower():
                         logger.error(f"Failed to edit message for {project_id}: {edit_err}")
@@ -931,6 +936,8 @@ async def schedule_price_corrections(
     min_daily_rate: int,
     original_text: str,
     original_keyboard: InlineKeyboardMarkup,
+    account_name: str = "",
+    title: str = "",
 ):
     """Через 60s и 600s: пересчёт цены и обновление бида.
 
@@ -938,6 +945,10 @@ async def schedule_price_corrections(
     """
     if not original_text or not bidding_service or not bid_id:
         return
+
+    from src.services.ai.gemini_analyzer import _acct_color
+    _ac = _acct_color(account_name) if account_name else "white"
+    _who = f"[{_ac}]{account_name}[/{_ac}]: {title[:35]}  " if account_name else ""
 
     current_text = original_text
     current_amount = original_amount
@@ -978,7 +989,7 @@ async def schedule_price_corrections(
                     result = bidding_service.update_bid(bid_id, floor_amount)
                     if result.success:
                         price_line = f"💰 _Price floored \\({minutes}min\\): {escape_markdown_v2(currency)} {escape_markdown_v2(f'{current_amount:.0f}')} → {escape_markdown_v2(f'{floor_amount:.0f}')}_"
-                        logger.info(f"Bid {bid_id} floored at {minutes}min: {current_amount:.0f} → {floor_amount:.0f} {currency} (market ${avg_bid_usd:.0f} below floor ${floor_usd:.0f})")
+                        logger.info(f"{_who}bid {bid_id} floored at {minutes}min: {current_amount:.0f} → {floor_amount:.0f} {currency} (market ${avg_bid_usd:.0f} below floor ${floor_usd:.0f})")
                         current_amount = floor_amount
                     else:
                         logger.error(f"Floor bid {bid_id} failed: {result.message}")
@@ -991,7 +1002,7 @@ async def schedule_price_corrections(
                     result = bidding_service.update_bid(bid_id, new_amount)
                     if result.success:
                         price_line = f"💰 _Price updated \\({minutes}min\\): {escape_markdown_v2(currency)} {escape_markdown_v2(f'{current_amount:.0f}')} → {escape_markdown_v2(f'{new_amount:.0f}')}_"
-                        logger.info(f"Bid {bid_id} updated at {minutes}min: {current_amount:.0f} → {new_amount:.0f} {currency}")
+                        logger.info(f"{_who}bid {bid_id} updated at {minutes}min: {current_amount:.0f} → {new_amount:.0f} {currency}")
                         current_amount = new_amount
                     else:
                         logger.error(f"Update bid {bid_id} failed: {result.message}")

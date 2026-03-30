@@ -69,6 +69,12 @@ class ProjectService:
 
             projects = []
             for p in projects_data:
+                # Always skip NDA projects (no API endpoint to sign programmatically)
+                nda = p.get("nda_details")
+                if nda and nda != {}:
+                    logger.debug(f"Skipping project {p.get('id')} - NDA required")
+                    continue
+
                 # Skip preferred freelancer only projects (if enabled in runtime settings)
                 if should_skip_preferred:
                     upgrades = p.get("upgrades") or {}

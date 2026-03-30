@@ -162,7 +162,7 @@ class FreelancerClient:
                     result = data.get("result", {})
                     remaining = result.get("bidsRemaining")
                     limit = result.get("bidLimit")
-                    logger.info(f"Bids remaining: {remaining} / {limit}")
+                    logger.debug(f"Bids remaining: {remaining} / {limit}")
                     return remaining
 
             logger.debug(f"getBidLimit failed: {response.status_code}")

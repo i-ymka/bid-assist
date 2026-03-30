@@ -126,6 +126,7 @@ async def polling_loop(
                     "owner_username": project.owner.username,
                     "owner_display_name": project.owner.display_name or "",
                     "is_preferred_only": project.is_preferred_only,
+                    "nda_required": project.nda_required,
                     "language": project.language,
                     "time_submitted": project.time_submitted,
                 }

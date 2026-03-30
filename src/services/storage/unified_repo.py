@@ -51,6 +51,7 @@ class UnifiedRepo:
                     owner_username  TEXT DEFAULT '',
                     owner_display_name TEXT DEFAULT '',
                     is_preferred_only INTEGER DEFAULT 0,
+                    nda_required    INTEGER DEFAULT 0,
                     language        TEXT DEFAULT 'en',
                     time_submitted  TIMESTAMP,
                     fetched_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -163,6 +164,7 @@ class UnifiedRepo:
             for col, definition in [
                 ("language", "TEXT DEFAULT 'en'"),
                 ("skill_ids_str", "TEXT DEFAULT ''"),
+                ("nda_required", "INTEGER DEFAULT 0"),
             ]:
                 try:
                     self._conn.execute(f"ALTER TABLE projects ADD COLUMN {col} {definition}")
