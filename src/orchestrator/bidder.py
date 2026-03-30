@@ -40,7 +40,7 @@ async def _process_account_bid(
             reason = tagger._check_filters(acc, project)
             if reason:
                 repo.mark_price_fail(pid, account_name)
-                logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  ({reason})")
+                logger.info(f"[bright_yellow]SKIP[/bright_yellow]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  ({reason})")
                 return
 
         # Per-account pricing
@@ -407,9 +407,38 @@ async def _process_account_bid(
             error_lower = bid_result.message.lower()
 
             if "nda" in error_lower or "sign the nda" in error_lower:
-                logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  (NDA required)")
+                # Auto-bid blocked by NDA — stage for manual so user can sign and bid manually
+                repo.add_pending_bid(
+                    account_name, pid,
+                    amount=amount, period=days, description=bid_text,
+                    title=title, currency=currency, url=project.get("url", ""),
+                    bid_count=project.get("bid_count", 0),
+                    summary=summary,
+                    budget_min=budget_min, budget_max=budget_max,
+                    client_country=project.get("client_country", ""),
+                    avg_bid=avg_bid,
+                )
+                if notifier:
+                    for chat_id in acc.telegram_chat_ids:
+                        await notifier.send_gpt_decision_notification_to_user(
+                            chat_id=chat_id,
+                            project_id=pid,
+                            title=title,
+                            budget_min=budget_min,
+                            budget_max=budget_max,
+                            currency=currency,
+                            client_country=project.get("client_country", ""),
+                            bid_count=project.get("bid_count", 0),
+                            avg_bid=avg_bid,
+                            url=project.get("url", ""),
+                            summary=summary,
+                            bid_text=bid_text,
+                            suggested_amount=amount,
+                            suggested_period=days,
+                        )
+                logger.info(f"[royal_blue1]SENT[/royal_blue1]  [{ac}]{account_name}[/{ac}]: ${amount:.0f}  ({days}d)  [{tc}]{title[:55]}[/{tc}]  (manual — NDA)")
             elif "preferred freelancer" in error_lower:
-                logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  (preferred-only)")
+                logger.info(f"[bright_yellow]SKIP[/bright_yellow]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  (preferred-only)")
             elif "used all" in error_lower or "all of your bids" in error_lower or ("bid" in error_lower and ("limit" in error_lower or "remain" in error_lower or "run out" in error_lower)):
                 repo.set_auto_bid(account_name, False)
                 logger.warning(f"[{ac}]{account_name}[/{ac}]: AUTO-BID DISABLED: No bids remaining")

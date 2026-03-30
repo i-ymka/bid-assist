@@ -117,6 +117,7 @@ class ProjectService:
             "user_country_details": "true",
             "bid_details": "true",
             "owner_info": "true",
+            "upgrade_details": "true",
         }
 
         logger.debug(f"Fetching details for project {project_id}")
