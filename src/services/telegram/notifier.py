@@ -913,7 +913,7 @@ async def schedule_bid_update(
                         logger.info(f"{who}{total} bids, avg ${avg:.0f}")
                 except Exception as edit_err:
                     if "message is not modified" not in str(edit_err).lower():
-                        logger.error(f"Failed to edit message for {project_id}: {edit_err}")
+                        logger.debug(f"Failed to edit message for {project_id}: {edit_err}")
             else:
                 logger.debug(f"Bids line unchanged for {project_id}")
         else:
@@ -1023,7 +1023,7 @@ async def schedule_price_corrections(
                 )
             except Exception as e:
                 if "message is not modified" not in str(e).lower():
-                    logger.error(f"Failed to edit message for {project_id}: {e}")
+                    logger.debug(f"Failed to edit message for {project_id}: {e}")
 
         except Exception as e:
             logger.error(f"Price correction failed for {project_id} at {delay//60}min: {e}")
