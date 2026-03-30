@@ -145,9 +145,10 @@ async def _process_account_bid(
             )
             # Send notification via Telegram
             notifier = services.get("notifier")
+            bidding_service = services.get("bidding_service")
             if notifier:
                 for chat_id in config.get_account(account_name).telegram_chat_ids:
-                    await notifier.send_gpt_decision_notification_to_user(
+                    result = await notifier.send_gpt_decision_notification_to_user(
                         chat_id=chat_id,
                         project_id=pid,
                         title=title,
@@ -163,6 +164,22 @@ async def _process_account_bid(
                         suggested_amount=amount,
                         suggested_period=days,
                     )
+                    if result:
+                        msg, orig_text, orig_keyboard = result
+                        if msg and bidding_service:
+                            from src.services.telegram.notifier import schedule_bid_update
+                            for delay in [60, 300, 600]:
+                                asyncio.create_task(schedule_bid_update(
+                                    bot=notifier._bot,
+                                    chat_id=chat_id,
+                                    message_id=msg.message_id,
+                                    project_id=pid,
+                                    bidding_service=bidding_service,
+                                    currency=currency,
+                                    original_text=orig_text,
+                                    original_keyboard=orig_keyboard,
+                                    delay=delay,
+                                ))
             logger.info(f"[royal_blue1]SENT[/royal_blue1]  [{ac}]{account_name}[/{ac}]: ${amount:.0f}  ({days}d)  [{tc}]{title[:55]}[/{tc}]  (manual)")
             return
 

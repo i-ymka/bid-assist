@@ -895,20 +895,22 @@ async def analysis_loop(repo: ProjectRepository, notifier: Notifier, shared_repo
                         )
                         if msg:
                             repo.mark_notification_sent(project_id)
-                            # Schedule delayed bids line update (60s)
+                            # Schedule bids line updates at 1min, 5min, 10min
                             from src.services.telegram.notifier import schedule_bid_update
-                            asyncio.create_task(
-                                schedule_bid_update(
-                                    bot=notifier._bot,
-                                    chat_id=chat_id,
-                                    message_id=msg.message_id,
-                                    project_id=project_id,
-                                    bidding_service=bid_svc,
-                                    currency=currency,
-                                    original_text=orig_text,
-                                    original_keyboard=orig_keyboard,
+                            for _delay in [60, 300, 600]:
+                                asyncio.create_task(
+                                    schedule_bid_update(
+                                        bot=notifier._bot,
+                                        chat_id=chat_id,
+                                        message_id=msg.message_id,
+                                        project_id=project_id,
+                                        bidding_service=bid_svc,
+                                        currency=currency,
+                                        original_text=orig_text,
+                                        original_keyboard=orig_keyboard,
+                                        delay=_delay,
+                                    )
                                 )
-                            )
                         logger.info(f"[royal_blue1]BID[/royal_blue1]  [{_title_color(project_id)}]{project_data['title'][:55]}[/{_title_color(project_id)}]  ${result.amount}  ({result.period}d)")
             else:
                 # SKIP verdict — notify based on mode:

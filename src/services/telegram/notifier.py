@@ -237,10 +237,11 @@ def _link_url(url: str) -> str:
 class Notifier:
     """Service for sending Telegram notifications with Bid button."""
 
-    def __init__(self, bot_token: str = None, chat_ids: list = None):
+    def __init__(self, bot_token: str = None, chat_ids: list = None, thread_id: int = 0):
         """Initialize the notifier."""
         self._token = bot_token or settings.telegram_bot_token
         self._chat_ids = chat_ids or settings.telegram_chat_ids
+        self._thread_id = thread_id  # message_thread_id for forum topics (0 = disabled)
         self._bot = Bot(token=self._token)
 
     async def send_project_notification(
@@ -625,7 +626,7 @@ class Notifier:
         success = False
         for chat_id in self._chat_ids:
             try:
-                await self._bot.send_message(
+                kwargs = dict(
                     chat_id=chat_id,
                     text=text,
                     parse_mode=parse_mode,
@@ -633,6 +634,9 @@ class Notifier:
                     disable_web_page_preview=True,
                     disable_notification=silent,
                 )
+                if self._thread_id:
+                    kwargs["message_thread_id"] = self._thread_id
+                await self._bot.send_message(**kwargs)
                 logger.debug(f"Notification sent to chat {chat_id}")
                 success = True
             except Exception as e:
@@ -786,7 +790,7 @@ class Notifier:
             Truthy/falsy behavior preserved for backward compatibility.
         """
         try:
-            msg = await self._bot.send_message(
+            kwargs = dict(
                 chat_id=chat_id,
                 text=text,
                 parse_mode=parse_mode,
@@ -794,6 +798,9 @@ class Notifier:
                 disable_web_page_preview=True,
                 disable_notification=silent,
             )
+            if self._thread_id:
+                kwargs["message_thread_id"] = self._thread_id
+            msg = await self._bot.send_message(**kwargs)
             logger.debug(f"Notification sent to user {chat_id}")
             return msg
         except Exception as e:
@@ -935,8 +942,7 @@ async def schedule_price_corrections(
     current_text = original_text
     current_amount = original_amount
 
-    for delay in [60, 600]:
-        sleep_time = delay if delay == 60 else 540  # 60s, затем ещё 540s = итого 10min
+    for delay, sleep_time in [(60, 60), (300, 240), (600, 300)]:  # 1min, 5min, 10min
         await asyncio.sleep(sleep_time)
 
         try:
