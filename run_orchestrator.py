@@ -237,7 +237,8 @@ async def main():
         )),
         asyncio.create_task(analysis_dispatcher(repo, shutdown_event, tagger=tagger, account_services=all_services)),
         asyncio.create_task(bid_dispatcher(config, repo, all_services, shutdown_event, tagger=tagger)),
-        asyncio.create_task(cleanup_loop(repo, shutdown_event)),
+        # cleanup_loop disabled — accumulate all data for analysis
+        # asyncio.create_task(cleanup_loop(repo, shutdown_event)),
     ]
 
     # Remove any asyncio signal handlers (they replace signal.signal with _sighandler_noop

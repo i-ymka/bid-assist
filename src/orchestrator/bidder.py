@@ -71,15 +71,12 @@ async def _process_account_bid(
             tier2_pct=tier2,
             tier3_pct=tier3,
             account_name=account_name,
-            silent=True,
+            silent=False,
+            title=title,
+            project_id=pid,
         )
 
-        floor_usd = days * min_rate
         if amount_usd is None:
-            logger.info(
-                f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]"
-                f"  (floor ${floor_usd:.0f}, {days}d × ${min_rate:.0f}/d)"
-            )
             notif_mode = repo.get_notif_mode(account_name)
             if notif_mode in ("all", "bids_plus"):
                 notifier = services.get("notifier")
@@ -98,11 +95,6 @@ async def _process_account_bid(
                         )
             repo.mark_price_fail(pid, account_name)
             return
-
-        logger.info(
-            f"[bold green]YEP[/bold green]   [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]"
-            f"  ${amount_usd:.0f}  ({days}d)  floor ${floor_usd:.0f}"
-        )
 
         # Convert back to project currency
         if currency != "USD":

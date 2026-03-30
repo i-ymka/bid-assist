@@ -181,7 +181,7 @@ def _parse_quota_cooldown(stderr: str) -> int:
         if total > 0:
             return total
 
-    return 86400  # fallback: 24h
+    return 3600  # fallback: 1h (real quota resets are always ≤24h, usually much less)
 
 
 def _classify_cli_error(stderr: str) -> str:
@@ -392,7 +392,9 @@ def _run_gemini_cli(
                 elif error_type == "quota":
                     cooldown_sec = _parse_quota_cooldown(result.stderr)
                     cd_h, cd_m = divmod(cooldown_sec // 60, 60)
-                    logger.info(f"{tag}{label}/{short}: [bold red]quota exhausted[/bold red] — {cd_h}h {cd_m}m")
+                    fallback_note = " [fallback]" if cooldown_sec == 86400 else ""
+                    logger.info(f"{tag}{label}/{short}: [bold red]quota exhausted[/bold red] — {cd_h}h {cd_m}m{fallback_note}  {clean_msg}")
+                    logger.debug(f"quota stderr: {result.stderr[:500]}")
                     _cooldowns[(home, model)] = time.time() + cooldown_sec
                     continue
                 elif error_type == "overload":
@@ -547,6 +549,8 @@ def _calculate_amount(
     tier3_pct: int = 50,
     account_name: str = "",
     silent: bool = False,
+    title: str = "",
+    project_id: int = 0,
 ) -> Optional[float]:
     """Deterministic pricing formula.
 
@@ -586,8 +590,10 @@ def _calculate_amount(
                 who = f"[{ac}]{account_name}[/{ac}]: "
             else:
                 who = ""
+            tc = _title_color(project_id) if project_id else "white"
+            title_part = f"[{tc}]{title[:55]}[/{tc}]  " if title else ""
             logger.info(
-                f"[slate_blue1]NOPE[/slate_blue1]  {who}${target:.0f} < floor ${floor:.0f}  ({days}d × ${effective_rate:.0f}/d)"
+                f"[slate_blue1]NOPE[/slate_blue1]  {who}{title_part}${target:.0f} < floor ${floor:.0f}  ({days}d × ${effective_rate:.0f}/d)"
             )
         return None  # signal to caller: skip this project
 
@@ -608,9 +614,10 @@ def _calculate_amount(
             who = f"[{ac}]{account_name}[/{ac}]: "
         else:
             who = ""
+        tc = _title_color(title) if title else "white"
+        title_part = f"[{tc}]{title[:55]}[/{tc}]  " if title else ""
         logger.info(
-            f"[bold green]YEP[/bold green]   {who}${final:.0f}  ({days}d)"
-            f"  target ${target:.0f}, floor ${floor:.0f}"
+            f"[bold green]YEP[/bold green]   {who}{title_part}${final:.0f} > floor ${floor:.0f}  ({days}d × ${effective_rate:.0f}/d)"
         )
     return final
 
