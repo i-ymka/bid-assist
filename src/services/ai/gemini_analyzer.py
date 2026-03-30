@@ -72,6 +72,12 @@ _cooldowns: dict[tuple[str, str], float] = {}
 # Flash overload retry counters. Key: (home_dir, model), Value: retry count so far.
 _overload_retries: dict[tuple[str, str], int] = {}
 
+# Slow-model tracking: if a model hangs for too long, skip all accounts using it temporarily.
+_model_slow_until: dict[str, float] = {}
+RETRY_SKIP_THRESHOLD = 60    # seconds: skip retries if attempt took longer than this
+MODEL_SLOW_THRESHOLD  = 300  # seconds: mark model as degraded if hung this long
+MODEL_SLOW_COOLDOWN   = 300  # seconds: how long to skip the degraded model
+
 # Set to True when all accounts/models are exhausted. Consumed once by analysis_loop to send notification.
 _all_exhausted_flag: bool = False
 
@@ -224,6 +230,7 @@ def _run_gemini_cli(
     call_label: str = "",
     log_title: str = "",
     project_id: int = 0,
+    required_pattern: Optional[str] = None,
 ) -> Optional[str]:
     """Run Gemini CLI with automatic account pool rotation on quota exhaustion.
 
@@ -267,6 +274,10 @@ def _run_gemini_cli(
             label = Path(home).name if home else "default"
             max_for_account = _MAX_ACTIVE_PRIMARY if home == _primary_home else _MAX_ACTIVE_POOL
             logger.debug(f"{label}/{_short_model(model)}: {_active_counts[home]} active (max {max_for_account}), skipping")
+        elif now < _model_slow_until.get(model, 0):
+            label = Path(home).name if home else "default"
+            remaining = int(_model_slow_until[model] - now)
+            logger.debug(f"{label}/{_short_model(model)}: model degraded {remaining}s left, skipping")
         else:
             available.append((home, model))
 
@@ -311,6 +322,8 @@ def _run_gemini_cli(
             # Re-check after acquiring lock (account may have been disabled while waiting)
             if time.time() < _cooldowns.get((home, model), 0):
                 continue
+            if time.time() < _model_slow_until.get(model, 0):
+                continue
 
             env = None
             if home:
@@ -318,6 +331,7 @@ def _run_gemini_cli(
                 env = {**_os.environ, "HOME": home}
 
             logger.info(f"{tag}[dim]{label}/{short}[/dim]{colored_title}")
+            t0 = time.time()
             _active_counts[home] = _active_counts.get(home, 0) + 1
             try:
                 proc = subprocess.Popen(
@@ -376,6 +390,13 @@ def _run_gemini_cli(
                     _cooldowns[(home, model)] = time.time() + cooldown_sec
                     continue
                 elif error_type == "overload":
+                    elapsed = time.time() - t0
+                    if elapsed > RETRY_SKIP_THRESHOLD:
+                        logger.info(f"{tag}{label}/{short}: [bright_yellow]overload[/bright_yellow] — slow ({elapsed:.0f}s), skip retry → next")
+                        if elapsed > MODEL_SLOW_THRESHOLD:
+                            _model_slow_until[model] = time.time() + MODEL_SLOW_COOLDOWN
+                            logger.info(f"{tag}model [bold]{short}[/bold] degraded → skip for {MODEL_SLOW_COOLDOWN // 60}min")
+                        continue
                     okey = (home, model)
                     n = _overload_retries.get(okey, 0) + 1
                     if n <= 3:
@@ -392,7 +413,14 @@ def _run_gemini_cli(
                             logger.info(f"{tag}{label}/{short}: [bright_yellow]overload[/bright_yellow] — giving up")
                     continue
                 else:
-                    logger.info(f"{tag}{label}/{short}: [bold yellow]{clean_msg}[/bold yellow]")
+                    elapsed = time.time() - t0
+                    if elapsed > RETRY_SKIP_THRESHOLD:
+                        logger.info(f"{tag}{label}/{short}: [bold yellow]slow fail ({elapsed:.0f}s)[/bold yellow] — skip retry → next")
+                        if elapsed > MODEL_SLOW_THRESHOLD:
+                            _model_slow_until[model] = time.time() + MODEL_SLOW_COOLDOWN
+                            logger.info(f"{tag}model [bold]{short}[/bold] degraded → skip for {MODEL_SLOW_COOLDOWN // 60}min")
+                    else:
+                        logger.info(f"{tag}{label}/{short}: [bold yellow]{clean_msg}[/bold yellow]")
                     continue
 
             _cooldowns.pop((home, model), None)
@@ -404,7 +432,20 @@ def _run_gemini_cli(
                 "YOLO mode is enabled. All tool calls will be automatically approved.",
             ]:
                 response = response.replace(boilerplate, "")
-            return response.strip()
+            response = response.strip()
+            if not response:
+                elapsed = time.time() - t0
+                logger.info(f"{tag}{label}/{short}: [bold yellow]empty response[/bold yellow] ({elapsed:.0f}s)")
+                if elapsed > MODEL_SLOW_THRESHOLD:
+                    _model_slow_until[model] = time.time() + MODEL_SLOW_COOLDOWN
+                    logger.info(f"{tag}model [bold]{short}[/bold] degraded → skip for {MODEL_SLOW_COOLDOWN // 60}min")
+                continue
+            if required_pattern and not re.search(required_pattern, response, re.IGNORECASE):
+                elapsed = time.time() - t0
+                logger.info(f"{tag}{label}/{short}: [bold yellow]malformed response[/bold yellow] ({elapsed:.0f}s) — no pattern, try next")
+                logger.debug(f"{tag}{label}/{short}: malformed snippet: {response[:200]!r}")
+                continue
+            return response
 
         except subprocess.TimeoutExpired:
             logger.error(f"{tag}{label}/{short}: timed out ({timeout}s)")
@@ -450,7 +491,7 @@ Write your THOUGHTS first (Risk check, Tech check, Red Zone check, Day estimate)
 Then output ===RESULT=== and the structured result.
 """
 
-    response = _run_gemini_cli(prompt, settings.gemini_model, settings.gemini_pool_model, timeout=1200, call_label="call1", log_title=title[:55], project_id=project_id)
+    response = _run_gemini_cli(prompt, settings.gemini_model, settings.gemini_pool_model, timeout=1200, call_label="call1", log_title=title[:55], project_id=project_id, required_pattern=r"VERDICT:\s*(PASS|SKIP|BID)")
     if not response:
         return None
 
