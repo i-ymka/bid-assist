@@ -214,7 +214,7 @@ class ProjectService:
             bids = result.get("bids", [])
 
             if not bids:
-                logger.info(f"Project {project_id}: No bids yet, cannot determine owner country")
+                logger.debug(f"Project {project_id}: No bids yet, cannot determine owner country")
                 return None
 
             owner_id = bids[0].get("project_owner_id")

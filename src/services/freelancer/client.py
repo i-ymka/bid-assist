@@ -74,7 +74,8 @@ class FreelancerClient:
             error_msg = error_data.get("message", str(e))
             error_code = error_data.get("error_code", "UNKNOWN")
 
-            logger.error(
+            log_fn = logger.debug if e.response.status_code == 404 else logger.error
+            log_fn(
                 f"API request failed: {method} {endpoint} - "
                 f"{e.response.status_code}: {error_msg}"
             )

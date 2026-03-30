@@ -24,10 +24,7 @@ class Settings(BaseSettings):
     gemini_pool_model: str = Field("gemini-3-flash-preview", alias="GEMINI_POOL_MODEL")  # Call 1: pool (free accounts)
     bid_pool_model: str = Field("gemini-3-flash-preview", alias="BID_POOL_MODEL")        # Call 2: pool (free accounts)
 
-    # TEMPORARY: Flash fallback for Call 1 when pro model hits server overload (503).
-    # Activated after 3 retry attempts on the pro model.
-    # TODO: Remove this fallback and revert to pro-only once gemini-3.1-pro-preview
-    #       becomes stable (503 overloads resolved on Google's side).
+    # Flash fallback for overload (503): retry pro 3 times, then fall back to flash
     gemini_overload_fallback_model: str = Field("gemini-3-flash-preview", alias="GEMINI_OVERLOAD_FALLBACK_MODEL")
 
     # Gemini account pool (multi-account quota rotation)

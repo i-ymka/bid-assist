@@ -1,121 +1,208 @@
-# TASKS: Bid Intelligence — расширенная аналитика + AI-анализ недели
+# TASKS: Единый оркестратор (v3.0)
 
-**Спека:** `SPEC_bid_intelligence.md`
+**Спека:** `SPEC_orchestrator.md`
+**Ветка:** `orchestrator`
 **Статус:** В работе
 
 ---
 
-## Фаза 1: Инфраструктура
+## Фаза 1: Фундамент (новые файлы, старый код не трогаем)
 
-- [ ] T001 Добавить `github_token: str` и `github_repo: str` в `Settings` (`settings.py`) + добавить плейсхолдеры в `.env.example` → `src/config/settings.py`, `.env.example`
+- [x] T001 AccountConfig dataclass — модель одного аккаунта → `src/config/account.py`
+  - Поля: name, freelancer_token, freelancer_auth_v2, telegram_token, telegram_chat_ids, prompts_dir, gemini_home_primary, gemini_home_pool
+  - `load_from_env(path: str) -> AccountConfig` — парсит .env файл
+  - Чистый dataclass, без зависимости от pydantic Settings
 
-- [ ] T002 Добавить 6 новых колонок в `bid_outcomes` через inline-миграции (`ALTER TABLE IF NOT EXISTS` паттерн): `winner_hourly_rate REAL`, `winner_reg_date INTEGER`, `winner_earnings_score REAL`, `winner_portfolio_count INTEGER`, `my_time_to_bid_sec INTEGER`, `winner_time_to_bid_sec INTEGER` → `src/services/storage/repository.py`
+- [x] T002 [P] Единая БД — новая схема с тегами → `src/services/storage/unified_repo.py`
+  - `projects` — project_id PK, title, description, budget_min/max, currency, country, bid_count, avg_bid, url, time_submitted, fetched_at, status (pending/analyzing/done/skipped), call1_verdict, call1_days, call1_summary
+  - `project_accounts` — (project_id, account_name) PK + price_ok, bid_placed, bid_id
+  - `bid_history` — как сейчас + `account TEXT`
+  - `pending_bids` — как сейча�� + `account TEXT`
+  - `runtime_settings` — ключ = `account:setting` (e.g. `ymka:budget_min`)
+  - `bid_outcomes` — как сейчас + `account TEXT`
+  - WAL mode, busy_timeout=5000
+  - Методы: add_project, tag_project, get_pending, mark_analyzing, store_call1, get_tagged_accounts, remove_tag, get/set settings per account
 
-- [ ] T003 Обновить `set_bid_outcome()` — принять и сохранить 6 новых полей из `winner_detail` dict (timing + extended profile). Обновить `get_bid_outcome_full()` — вернуть все 6 новых полей в словаре → `src/services/storage/repository.py`
-
----
-
-## Фаза 2: Получение данных
-
-- [ ] T004 [P] Добавить `get_portfolio_count(user_id: int) -> Optional[int]` в `projects.py` — GET `/users/0.1/portfolios/?users[]={user_id}&compact=true&limit=0`, вернуть `result.total_count`. Обернуть в try/except → None если API не поддерживает → `src/services/freelancer/projects.py`
-
-- [ ] T005 Обновить `_classify_project()` в `handlers.py`:
-  - Расширить params профиля победителя: добавить `hourly_rate=true`, `registration_date=true`, `earnings=true`
-  - Извлечь из ответа: `hourly_rate`, `registration_date` (unix ts), `earnings_score` из `reputation.entire_history`
-  - Найти мой бид в `bids` (bidder_id == my_user_id), взять его `submitdate`
-  - Вычислить `my_time_to_bid_sec = my_bid.submitdate - project.time_submitted`
-  - Вычислить `winner_time_to_bid_sec = winning_bid.submitdate - project.time_submitted`
-  - Вызвать `get_portfolio_count(winner_user_id)` для победителя
-  - Добавить все новые поля в `winner_detail` dict → `src/services/telegram/handlers.py`
-
-- [ ] T006 Обновить блок получения `my_profile` в `_fetch_bid_stats_sync()`:
-  - Расширить params: добавить `hourly_rate=true`, `registration_date=true`, `earnings=true`
-  - Извлечь те же поля что у победителя
-  - Вызвать `get_portfolio_count(my_user_id)`
-  - Добавить в `my_profile`: `hourly_rate`, `years_on_platform` (из registration_date), `earnings_score`, `portfolio_count`, `bid_adjustment` (из settings), `min_daily_rate` (из settings) → `src/services/telegram/handlers.py`
+- [x] T003 OrchestratorConfig — загрузка всех аккаунтов + merged фильтры → `src/config/loader.py`
+  - `discover_accounts()` — находит `.env.*` (кроме .env.example)
+  - `OrchestratorConfig` — list[AccountConfig] + merged_budget_min/max, merged_skill_ids, merged_countries и т.д.
+  - Merged = union/расширение диапазонов всех аккаунтов
+  - Зависит от T001
 
 ---
 
-## Фаза 3: Отображение
+## Фаза 2: Ядро pipeline (новые модули)
 
-- [ ] T007 Обновить `_build_loss_card()` в `handlers.py`:
-  - Добавить строку timing: `⏱ You: Xmin | Winner: Ymin` (если < 60 мин — в минутах, иначе `Xh Ym`)
-  - Добавить расширенный профиль победителя: hourly rate (`$X/hr`), лет на платформе, earnings score (`X/10`), portfolio count
-  - Если поле None — пропустить (не ломать карточку) → `src/services/telegram/handlers.py`
+- [x] T004 ProjectTagger — per-account фильтрация и тегирование → `src/filters/tagger.py`
+  - `ProjectTagger(accounts: list[AccountConfig], repo: UnifiedRepo)`
+  - `tag_project(project_data) -> list[str]` — прогоняет через фильтры каждого аккаунта
+  - Использует существующие BudgetFilter, BlacklistFilter, CountryFilter
+  - Per-account: бюджет, blacklist, страны, валюты, языки, max_bid_count, verified, preferred
+  - Записывает теги в project_accounts
 
-- [ ] T008 Добавить блок "My profile" в начало `handle_bidstats_callback()` перед отправкой карточек:
-  - Форматировать как отдельное сообщение: username, country, rating, reviews, hourly rate, лет на платформе, earnings score, portfolio count, bid_adjustment, min_daily_rate
-  - Отправить через `query.message.reply_text(...)` до первой loss-карточки → `src/services/telegram/handlers.py`
+- [x] T005 Unified polling loop → `src/orchestrator/polling.py`
+  - `async def polling_loop(config: OrchestratorConfig, repo: UnifiedRepo, tagger: ProjectTagger)`
+  - Один запрос к Freelancer API с merged параметрами
+  - Для каждого нового проекта: tag → если теги есть, сохранить в projects + project_accounts
+  - Если 0 тегов → пропустить
+  - Не блокируется ожиданием Call 1
 
-- [ ] T009 Добавить кнопку **"📊 Analyse week"** после последней loss-карточки (или после dashboard если лоссов нет):
-  - Callback data: `bidstats:analyse_week:{period}` (period = "weekly")
-  - Отображается только для `period == "weekly"` → `src/services/telegram/handlers.py`
+- [x] T006 Load-based Gemini ротация → `src/services/ai/gemini_analyzer.py` (модификация)
+  - `_active_counts: dict[str, int]` — счётчик активных CLI per home_dir
+  - В `_run_gemini_cli()`: пропускать home_dir если active >= 5
+  - Инкремент/декремент через try/finally
+  - Существующая cooldown-ротация сохр��няется
 
----
+- [x] T007 Parallel Call 1 dispatcher → `src/orchestrator/analyzer.py`
+  - `async def analysis_dispatcher(config, repo)`
+  - Цикл: берёт проекты со статусом `pending`
+  - Для каждого: `asyncio.create_task(run_call1(project_id))` — fire-and-forget
+  - `asyncio.Semaphore(5)` — макс 5 одновременных Call 1
+  - `run_call1()`: вызывает `analyze_feasibility()`, записывает результат в projects, меняет статус
 
-## Фаза 4: AI-анализ и GitHub
-
-- [ ] T010 Добавить `analyse_weekly_bids(wins, losses, my_profile)` в `gemini_analyzer.py`:
-  - Строит inline-промпт (не .md файл) с полным пакетом данных за неделю
-  - Промпт требует: 3+ пронумерованных предложения, паттерны победы, приоритеты
-  - Вызывает `_run_gemini_cli(prompt, settings.gemini_model, ANALYSIS_FALLBACK_MODELS)`
-  - Возвращает текст анализа (str) или None → `src/services/ai/gemini_analyzer.py`
-
-- [ ] T011 [P] Создать `src/services/github.py` — функция `post_issue(token, repo, title, body, labels=[])`:
-  - POST `https://api.github.com/repos/{repo}/issues`
-  - Headers: `Authorization: Bearer {token}`, `Accept: application/vnd.github+json`
-  - Возвращает URL нового Issue или None при ошибке → `src/services/github.py`
-
-- [ ] T012 Добавить обработчик `bidstats:analyse_week:*` в `handle_bidstats_callback()`:
-  - Ответить "⏳ Analysing your bids..." (новое сообщение через `reply_text`)
-  - Собрать wins, losses, my_profile из данных `_fetch_bid_stats_sync()`
-  - Вызвать `analyse_weekly_bids(...)` из T010 (в executor — блокирующий)
-  - Отправить результат в Telegram (HTML-форматирование, разбивать если > 4096 символов)
-  - Вызвать `post_issue(...)` из T011 — заголовок `[AI Analysis] Week of YYYY-MM-DD — @username`
-  - Добавить в конец ответного сообщения: `🔗 GitHub Issue: {url}` если Issue создан
-  - Добавить ссылку на Issue в `docs/PROMPT_LOG.md` (append строку `- [Issue #{N}]({url}) — YYYY-MM-DD`) → `src/services/telegram/handlers.py`
+- [x] T008 Post-Call-1 + Call 2 + bidding → `src/orchestrator/bidder.py`
+  - `async def bid_dispatcher(config, repo, account_services)`
+  - Цикл: берёт проекты status=done, verdict=PASS
+  - Для каждого тегированного аккаунта: `_calculate_amount()` с его настройками
+  - Если цена не прошла → remove_tag(project_id, account)
+  - Оставшиеся: `asyncio.create_task(run_call2_and_bid(project, account))`
+  - `run_call2_and_bid()`: write_bid (с промптом аккаунта) → place_bid (с OAuth аккаунта) → update project_accounts
 
 ---
 
-## Фаза 5: Полировка
+## Фаз�� 3: Интеграция (per-account сервисы)
 
-- [ ] T013 [P] Обновить `.env.example` — добавить секцию с `GITHUB_TOKEN=` и `GITHUB_REPO=` (с комментарием) → `.env.example`
+- [x] T009 Per-account сервисы — инициализация → `src/orchestrator/services.py`
+  - `AccountServices` dataclass: name, freelancer_client, bidding_service, notifier, telegram_app
+  - `init_account_services(account: AccountConfig, repo: UnifiedRepo) -> AccountServices`
+  - Каждый аккаунт: свой FreelancerClient (OAuth), BiddingService, Notifier (Telegram token)
 
-- [ ] T014 [P] Обновить документацию: ARCHITECTURE.md (добавить `github.py`, расширить описание `bid_outcomes`, `handlers.py`), TECH_SPEC.md (v2.6 → DONE), DECISION_LOG.md (новая запись) → `docs/`
+- [x] T010a Инжекция контекста в bot_data → `src/orchestrator/telegram.py`
+  - Функция `setup_bot(account, repo, services) -> Application`
+  - Пишет в `app.bot_data`: account_name, repo (UnifiedRepo), bidding_service, project_service, notifier
+  - Вызывает `setup_handlers(app)`
+  - `start_all_bots()` / `stop_all_bots()`
+
+- [x] T010b Helper для handlers: получение контекста + AccountRepoAdapter → `handlers.py` + `repo_adapter.py`
+  - `_ctx(context)` → возвращает (account_name, repo) из `context.bot_data`
+  - `_svc(context)` → возвращает (bidding_service, project_service) из `context.bot_data`
+  - Убрать глобальные `_bidding_service`, `_project_service`, `_init_repo`
+
+- [x] T010c Замена ProjectRepository() → _ctx(context) во ВСЕХ handlers → `handlers.py`
+  - ~30 мест: `repo = ProjectRepository()` → `account, repo = _ctx(context)`
+  - Все вызовы repo.get/set методов: добавить `account` первым аргументом
+  - get_bidding_service() / get_project_service() → _svc(context)
+
+- [x] T010d Settings/keyboard уже работают через adapter (repo.is_paused() → adapter.is_paused())
+  - Принимают `(account, repo)` вместо `(repo)`
+  - Все repo.is_paused() → repo.is_paused(account) и т.д.
+
+- [x] T012 Per-account notifier (per-account через services init, bot_data injection)
 
 ---
 
-## Зависимости между задачами
+## Ф��за 4: Сборка и де��лой
+
+- [x] T013 Новый run.py → `run_orchestrator.py` (отдельный файл, старый run.py не тронут)
+  - Загрузка OrchestratorConfig
+  - Инициализация UnifiedRepo, per-account services
+  - Запуск asyncio tasks: polling_loop, analysis_dispatcher, bid_dispatcher, cleanup_loop
+  - Telegram bots polling в том же event loop
+  - Graceful shutdown
+  - CLI: `python run.py` (автодетект .env.*) или `python run.py --accounts .env.ymka`
+
+- [x] T014 [P] Cleanup loop → `src/orchestrator/cleanup.py`
+  - Удаление проектов старше 24ч из projects + project_accounts
+  - Удаление старых bid_outcomes
+  - Без shared_repository (больше не нужен)
+
+- [x] T015 Логирование (account prefix уже в bidder/polling через `[{account_name}]`)
+  - Каждое per-account сообщение: `[ymka]` / `[yehia]` prefix
+  - Один поток вывода
+
+- [x] T015 Логирование — цвета аккаунтов
+  - `_ACCT_COLORS + _acct_color()` в `gemini_analyzer.py`: ymka=plum1, yehia=cornflower_blue
+  - Все логи bidder.py: `[{ac}]{account_name}[/{ac}]`
+  - YEP показывает `target $X, floor $Y`
+  - SENT = отправлено в TG (manual), BID  = бид размещён (auto)
+
+- [ ] T016 Деплой на сервер
+  - git push orchestrator → git pull на сервере → тест
+  - Один systemd-сервис `bid-assist.service` (Restart=always)
+  - Остановить bid-ymka + bid-yehia, запустить bid-assist
+
+- [ ] T017 Ctrl+C shutdown (НЕ РЕШЕНО)
+  - signal.signal / loop.add_signal_handler / remove+signal — ничего не работает
+  - python-telegram-bot или asyncio перезаписывают handler
+  - Workaround: pkill -9 из другого терминала
+
+- [x] T018 Per-account skill check в tagger
+  - tagger._check_filters не проверяет скиллы аккаунта
+  - Нужно до разделения скиллов между аккаунтами
+  - Freelancer отклонит бид если у аккаунта нет требуемого скилла
+
+---
+
+## Фаза 5: Feature parity с run.py (аудит 2026-03-30)
+
+> Найдено систематическим сравнением — вещи которые есть в run.py но не попали в orchestrator при переносе.
+> Принцип: берём реализацию из run.py и адаптируем под multi-account, не пишем с нуля.
+
+- [x] T021 Skip/NOPE нотификации — при `price < floor` (bidder.py:76-79) добавить `send_skip_notification_to_user()` с проверкой `notif_mode` (all/bids_plus/bids) как в run.py:914-919 → `src/orchestrator/bidder.py`
+
+- [x] T022 Gemini quota exhaustion — при исчерпании всех аккаунтов в `analyzer.py` делать 30min паузу и слать Telegram нотификацию (как run.py через exhaustion flag) → `src/orchestrator/analyzer.py`
+
+- [x] T023 Language field — сохранять `language` в таблицу `projects` при поллинге (поле есть в схеме, tagger фильтрует по нему, но оно никогда не заполняется из API) → `src/orchestrator/polling.py`
+
+- [x] T024 Last-mile bid_count check — прямо перед `bidding_service.place_bid()` делать свежую проверку `fresh_bid_count > max_bids` (как run.py:699-709), сейчас pre-bid recheck есть но этот check отсутствует → `src/orchestrator/bidder.py`
+
+- [x] T019 Fair price guard — `bidder.py`
+  - Если `fair_price > amount * 2` → NOPE, бид не размещается
+  - Работает для обоих путей (manual + auto), до развилки `is_auto_bid()`
+  - Лог: `(bid $350, AI est $800 = 2.3x)`
+
+- [x] T020 AccountRepoAdapter — полное покрытие методов handlers.py
+  - Аудит: все 41 метод из handlers.py покрыты
+  - Добавлены: `get_bid_stats`, `get_recent_bids_full`, `get_processed_count`, `set_max_project_age`, `update_bid_record_on_place`
+
+---
+
+## Зависимости
 
 ```
-T001 → T012 (GitHub token нужен в settings)
-T002 → T003 (колонки нужны для методов)
-T003 → T005 (set_bid_outcome принимает новые поля)
-T003 → T006 (get_bid_outcome_full возвращает новые поля)
-T004 → T005 (get_portfolio_count вызывается в _classify_project)
-T004 → T006 (get_portfolio_count вызывается для my_profile)
-T005 → T007 (новые поля доступны для отображения)
-T006 → T008 (my_profile с расширенными данными)
-T006 → T010 (my_profile нужен в analyse prompt)
-T007, T008, T009 → T012 (UI готов перед логикой кнопки)
-T010 → T012 (analyse function нужна в callback)
-T011 → T012 (GitHub posting нужен в callback)
+T001 → T003 → T004 → T005
+                 ↘
+T002 ──→ T004    T007 → T008
+     ──→ T005
+     ──→ T007
+     ──→ T008
+
+T006 (независимая модификация gemini_analyzer)
+
+T009 → T010 ──→ T013
+T011 ─────────→ T013
+T012 ─────────→ T013
+T014, T015 ───→ T013
 ```
 
-Параллельно: **T004** и **T011** (независимые новые функции).
-Параллельно после T012: **T013** и **T014**.
+**Параллельные группы:**
+- **T001 + T002 + T006** — три независимых фундамента
+- **T004 + T007** — после T001+T002
+- **T009 + T011 + T012** — после T002
+- **T014 + T015** — после T002
+
+**Критический путь:** T001 → T003 → T005 → T007 → T008 → T013
 
 ---
 
-## Затронутые файлы
+## Порядок старт��
 
-| Файл | Тип |
-|------|-----|
-| `src/config/settings.py` | +2 поля |
-| `src/services/storage/repository.py` | +6 колонок, обновить 2 метода |
-| `src/services/freelancer/projects.py` | +1 метод |
-| `src/services/ai/gemini_analyzer.py` | +1 функция |
-| `src/services/github.py` | НОВЫЙ |
-| `src/services/telegram/handlers.py` | 5 изменений |
-| `.env.example` | +2 строки |
-| `docs/` | документация |
+1. **T001** AccountConfig + **T002** Unified DB + **T006** Load rotation — параллел��но
+2. **T003** OrchestratorConfig — после T001
+3. **T004** Tagger + **T005** Polling — после T002+T003
+4. **T007** Call 1 dispatcher — после T002
+5. **T008** Call 2 + bidding — после T007
+6. **T009** Per-account services — после T002
+7. **T010–T012** Telegram — после T009
+8. **T013** run.py — финальная сборка
+9. **T014–T016** Polish + deploy

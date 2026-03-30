@@ -109,7 +109,7 @@ class BiddingService:
                 )
             else:
                 error_msg = response.get("message", "Unknown error from API")
-                logger.error(f"Bid failed for project {bid.project_id}: {error_msg}")
+                logger.debug(f"Bid failed for project {bid.project_id}: {error_msg}")
                 return BidResult(
                     success=False,
                     message=error_msg,
@@ -117,14 +117,14 @@ class BiddingService:
                 )
 
         except BidPlacementError as e:
-            logger.error(f"Bid placement error for project {bid.project_id}: {e}")
+            logger.debug(f"Bid placement error for project {bid.project_id}: {e}")
             return BidResult(
                 success=False,
                 message=str(e),
                 error_code=e.error_code,
             )
         except Exception as e:
-            logger.error(f"Unexpected error placing bid on project {bid.project_id}: {e}")
+            logger.debug(f"Unexpected error placing bid on project {bid.project_id}: {e}")
             return BidResult(
                 success=False,
                 message=f"Unexpected error: {e}",
@@ -193,7 +193,7 @@ class BiddingService:
 
                 # Check if bid_rank field exists (API returns None but might work someday)
                 bid_rank = result.get("bid_rank")
-                logger.info(f"bid_rank from API: {bid_rank}")
+                logger.debug(f"bid_rank from API: {bid_rank}")
 
                 # If we have project_id, fetch all bids and find our position
                 if project_id:
@@ -241,13 +241,13 @@ class BiddingService:
                 amounts = [b.get("amount") for b in bids if b.get("amount")]
                 avg_bid = sum(amounts) / len(amounts) if amounts else 0
 
-                logger.info(f"Fetched {total_bids} bids for project {project_id} (avg: {avg_bid:.0f})")
+                logger.debug(f"Fetched {total_bids} bids (avg: {avg_bid:.0f})")
 
                 # Find our bid's position (note: sorted by date, not rank)
                 for idx, bid in enumerate(bids):
                     if bid.get("id") == bid_id:
                         position = idx + 1  # 1-based position
-                        logger.info(f"Our bid at position {position} of {total_bids}")
+                        logger.debug(f"Our bid at position {position} of {total_bids}")
                         return {"rank": position, "total_bids": total_bids, "avg_bid": avg_bid}
 
                 # Bid not found in list, just return total

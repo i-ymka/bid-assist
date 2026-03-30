@@ -74,7 +74,24 @@ async def _process_account_bid(
         )
 
         if amount_usd is None:
-            # Price below floor — remove tag
+            # Price below floor — NOPE
+            logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  (below floor)")
+            notif_mode = repo.get_notif_mode(account_name)
+            if notif_mode in ("all", "bids_plus"):
+                notifier = services.get("notifier")
+                if notifier:
+                    for chat_id in acc.telegram_chat_ids:
+                        await notifier.send_skip_notification_to_user(
+                            chat_id=chat_id,
+                            project_id=pid,
+                            title=title,
+                            budget_min=budget_min,
+                            budget_max=budget_max,
+                            currency=currency,
+                            client_country=project.get("client_country", "Unknown"),
+                            url=project.get("url", ""),
+                            summary=project.get("call1_summary", ""),
+                        )
             repo.mark_price_fail(pid, account_name)
             return
 
@@ -113,6 +130,22 @@ async def _process_account_bid(
                 f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]"
                 f"  (bid ${amount:.0f}, AI est ${fair_price:.0f} = {ratio:.1f}x)"
             )
+            notif_mode = repo.get_notif_mode(account_name)
+            if notif_mode in ("all", "bids_plus"):
+                notifier = services.get("notifier")
+                if notifier:
+                    for chat_id in acc.telegram_chat_ids:
+                        await notifier.send_skip_notification_to_user(
+                            chat_id=chat_id,
+                            project_id=pid,
+                            title=title,
+                            budget_min=budget_min,
+                            budget_max=budget_max,
+                            currency=currency,
+                            client_country=project.get("client_country", "Unknown"),
+                            url=project.get("url", ""),
+                            summary=summary,
+                        )
             repo.mark_price_fail(pid, account_name)
             return
 
@@ -228,6 +261,7 @@ async def _process_account_bid(
                 "time_submitted": fresh.time_submitted,
                 "is_preferred_only": fresh.is_preferred_only,
                 "language": fresh.language,
+                "skill_ids_str": ",".join(str(sid) for sid in fresh.skill_ids),
             }
 
             # All filters
@@ -235,6 +269,18 @@ async def _process_account_bid(
                 reason = tagger._check_filters(acc, fresh_data)
                 if reason:
                     logger.info(f"[yellow3]LATE[/yellow3]   [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  ({reason})")
+                    repo.mark_bid_placed(pid, account_name)
+                    return
+
+            # Last-mile bid_count check: fresh count from API right before placing
+            if fresh.bid_stats:
+                max_bids_now = repo.get_max_bid_count(account_name)
+                fresh_bid_count = fresh.bid_stats.bid_count
+                if fresh_bid_count > max_bids_now:
+                    logger.info(
+                        f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: "
+                        f"[{tc}]{title[:55]}[/{tc}]  ({fresh_bid_count} bids > limit {max_bids_now})"
+                    )
                     repo.mark_bid_placed(pid, account_name)
                     return
 
