@@ -194,6 +194,11 @@ async def main():
     # Initialize unified database
     repo = UnifiedRepo("data/orchestrator.db")
 
+    # Reset any projects stuck in 'analyzing' from a previous crash/kill
+    stale = repo.reset_stale_analyzing()
+    if stale:
+        logger.info(f"Reset {stale} stale 'analyzing' project(s) → pending")
+
     # Initialize color DB for round-robin project title colors
     from src.services.ai.gemini_analyzer import init_color_db
     init_color_db(repo)

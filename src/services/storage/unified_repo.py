@@ -177,6 +177,14 @@ class UnifiedRepo:
     # Projects
     # ──────────────────────────────────────────────────────────────────
 
+    def reset_stale_analyzing(self) -> int:
+        """On startup: reset projects stuck in 'analyzing' back to 'pending' (killed mid-call1)."""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE projects SET status = 'pending' WHERE status = 'analyzing'"
+            )
+            return cur.rowcount
+
     def add_project(self, project_id: int, **kwargs) -> bool:
         """Insert a new project. Returns False if already exists."""
         try:
