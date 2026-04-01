@@ -14,6 +14,8 @@ from src.filters.tagger import ProjectTagger
 
 logger = logging.getLogger(__name__)
 
+# Project outcome tracking for DONE summary (per-project, cleared after log)
+_project_outcomes: dict[int, dict[str, str]] = {}
 
 async def _process_account_bid(
     project: dict,
@@ -29,6 +31,7 @@ async def _process_account_bid(
     acc = config.get_account(account_name)
     services = account_services[account_name]
 
+    _outcome = "?"  # for DONE summary
     try:
         title = project.get("title", "")
 
@@ -39,6 +42,7 @@ async def _process_account_bid(
         if tagger:
             reason = tagger._check_filters(acc, project)
             if reason:
+                _outcome = "SKIP"
                 repo.mark_price_fail(pid, account_name)
                 logger.info(f"[bright_yellow]SKIP[/bright_yellow]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  ({reason})")
                 return
@@ -93,6 +97,7 @@ async def _process_account_bid(
                             url=project.get("url", ""),
                             summary=project.get("call1_summary", ""),
                         )
+            _outcome = "NOPE"
             repo.mark_price_fail(pid, account_name)
             return
 
@@ -121,6 +126,7 @@ async def _process_account_bid(
         )
 
         if not bid_text:
+            _outcome = "ERR"
             logger.error(f"[{ac}]{account_name}[/{ac}]: call2 failed: [{tc}]{title[:55]}[/{tc}]")
             repo.mark_bid_placed(pid, account_name)  # don't retry
             return
@@ -148,6 +154,7 @@ async def _process_account_bid(
                             url=project.get("url", ""),
                             summary=summary,
                         )
+            _outcome = "NOPE"
             repo.mark_price_fail(pid, account_name)
             return
 
@@ -217,6 +224,7 @@ async def _process_account_bid(
                                     account_name=account_name,
                                     title=title,
                                 ))
+            _outcome = f"SENT ${amount:.0f}"
             logger.info(f"[royal_blue1]SENT[/royal_blue1]  [{ac}]{account_name}[/{ac}]: ${amount:.0f}  ({days}d)  [{tc}]{title[:55]}[/{tc}]  (manual)")
             return
 
@@ -248,6 +256,7 @@ async def _process_account_bid(
         if project_service:
             fresh = await loop.run_in_executor(None, project_service.get_project_details, pid)
             if not fresh:
+                _outcome = "LATE"
                 logger.info(f"[yellow3]LATE[/yellow3]   [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  (project closed)")
                 repo.mark_bid_placed(pid, account_name)
                 return
@@ -273,6 +282,7 @@ async def _process_account_bid(
             if tagger:
                 reason = tagger._check_filters(acc, fresh_data)
                 if reason:
+                    _outcome = "LATE"
                     logger.info(f"[yellow3]LATE[/yellow3]   [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  ({reason})")
                     repo.mark_bid_placed(pid, account_name)
                     return
@@ -282,8 +292,9 @@ async def _process_account_bid(
                 max_bids_now = repo.get_max_bid_count(account_name)
                 fresh_bid_count = fresh.bid_stats.bid_count
                 if fresh_bid_count > max_bids_now:
+                    _outcome = "LATE"
                     logger.info(
-                        f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: "
+                        f"[yellow3]LATE[/yellow3]   [{ac}]{account_name}[/{ac}]: "
                         f"[{tc}]{title[:55]}[/{tc}]  ({fresh_bid_count} bids > limit {max_bids_now})"
                     )
                     repo.mark_bid_placed(pid, account_name)
@@ -300,6 +311,7 @@ async def _process_account_bid(
                 tier2_pct=tier2, tier3_pct=tier3, account_name=account_name, silent=True,
             )
             if fresh_amount is None:
+                _outcome = "NOPE"
                 logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  (price below floor after recheck)")
                 repo.mark_bid_placed(pid, account_name)
                 return
@@ -400,6 +412,7 @@ async def _process_account_bid(
                             )
                         )
 
+            _outcome = f"BID ${amount:.0f}"
             logger.info(f"[royal_blue1]BID [/royal_blue1]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  ${amount:.0f}  ({days}d)")
 
         else:
@@ -436,8 +449,10 @@ async def _process_account_bid(
                             suggested_amount=amount,
                             suggested_period=days,
                         )
+                _outcome = f"SENT ${amount:.0f}"
                 logger.info(f"[royal_blue1]SENT[/royal_blue1]  [{ac}]{account_name}[/{ac}]: ${amount:.0f}  ({days}d)  [{tc}]{title[:55]}[/{tc}]  (manual — NDA)")
             elif "preferred freelancer" in error_lower:
+                _outcome = "SKIP"
                 logger.info(f"[bright_yellow]SKIP[/bright_yellow]  [{ac}]{account_name}[/{ac}]: [{tc}]{title[:55]}[/{tc}]  (preferred-only)")
             elif "used all" in error_lower or "all of your bids" in error_lower or ("bid" in error_lower and ("limit" in error_lower or "remain" in error_lower or "run out" in error_lower)):
                 repo.set_auto_bid(account_name, False)
@@ -459,17 +474,33 @@ async def _process_account_bid(
                             amount=amount,
                             error=bid_result.message,
                         )
+                _outcome = "ERR"
                 logger.error(f"[{ac}]{account_name}[/{ac}]: FAIL  [{tc}]{title[:55]}[/{tc}]  — {bid_result.message}")
 
     except Exception as e:
+        _outcome = "ERR"
         _tc = _title_color(pid) if pid else "white"
         _ac = _acct_color(account_name) if account_name else "white"
         logger.error(f"[{_ac}]{account_name}[/{_ac}]: Error bidding: [{_tc}]{title[:55]}[/{_tc}] — {e}")
         repo.mark_bid_placed(pid, account_name)
     finally:
-        # If all accounts done → mark project complete
+        _project_outcomes.setdefault(pid, {})[account_name] = _outcome
+        # If all accounts done → mark project complete + log DONE summary
         if not repo.get_unbid_tags(pid):
             repo.set_status(pid, "bidded")
+            tagged = repo.get_tags(pid)
+            if len(tagged) >= 2:
+                outcomes = _project_outcomes.pop(pid, {})
+                parts = []
+                for acc_name in sorted(tagged):
+                    oc = outcomes.get(acc_name, "?")
+                    _a = _acct_color(acc_name)
+                    parts.append(f"[{_a}]{acc_name}[/{_a}]: {oc}")
+                _t = project.get("title", "")
+                tc_ = _title_color(pid)
+                logger.info(f"[dim]done[/dim]  [{tc_}]{_t[:50]}[/{tc_}]  {'  '.join(parts)}")
+            else:
+                _project_outcomes.pop(pid, None)
 
 
 async def bid_dispatcher(
@@ -506,9 +537,11 @@ async def bid_dispatcher(
                             reason = tagger._check_filters(acc, project) or "unknown"
                             disp_ac = _acct_color(acc.name)
                             logger.info(f"[slate_blue1]NOPE[/slate_blue1]  [{disp_ac}]{acc.name}[/{disp_ac}]: [{disp_tc}]{title[:55]}[/{disp_tc}]  ({reason})")
+                            _project_outcomes.setdefault(pid, {})[acc.name] = "NOPE"
 
                 if not accounts_to_bid:
                     repo.set_status(pid, "bidded")
+                    _project_outcomes.pop(pid, None)
                     continue
 
                 # Block re-pickup: status='bidding' prevents get_done_projects from returning this project

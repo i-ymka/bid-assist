@@ -76,7 +76,8 @@ _overload_retries: dict[tuple[str, str], int] = {}
 _model_slow_until: dict[str, float] = {}
 RETRY_SKIP_THRESHOLD = 60    # seconds: skip retries if attempt took longer than this
 MODEL_SLOW_THRESHOLD  = 300  # seconds: mark model as degraded if hung this long
-MODEL_SLOW_COOLDOWN   = 300  # seconds: how long to skip the degraded model
+MODEL_SLOW_COOLDOWN   = 300   # seconds: how long to skip the degraded model (overload)
+NO_CAPACITY_COOLDOWN  = 3600  # seconds: how long to skip the model when server has no capacity
 
 # Set to True when all accounts/models are exhausted. Consumed once by analysis_loop to send notification.
 _all_exhausted_flag: bool = False
@@ -399,12 +400,13 @@ def _run_gemini_cli(
                     _cooldowns[(home, model)] = time.time() + cooldown_sec
                     continue
                 elif error_type == "no_capacity":
+                    _model_slow_until[model] = time.time() + NO_CAPACITY_COOLDOWN
                     fallback = settings.gemini_overload_fallback_model
                     if fallback and fallback != model:
-                        logger.info(f"{tag}{label}/{short}: [bright_yellow]no capacity[/bright_yellow] → {_short_model(fallback)}")
+                        logger.info(f"{tag}{label}/{short}: [bright_yellow]no capacity[/bright_yellow] → {_short_model(fallback)}  (skip {short} {NO_CAPACITY_COOLDOWN // 60}min)")
                         available.append((home, fallback))
                     else:
-                        logger.info(f"{tag}{label}/{short}: [bright_yellow]no capacity[/bright_yellow] — no fallback, skip")
+                        logger.info(f"{tag}{label}/{short}: [bright_yellow]no capacity[/bright_yellow] — no fallback, skip for {NO_CAPACITY_COOLDOWN // 60}min")
                     continue
                 elif error_type == "overload":
                     elapsed = time.time() - t0
