@@ -55,8 +55,6 @@ async def _run_call1(project: dict, repo: UnifiedRepo, loop: asyncio.AbstractEve
                 repo.set_status(pid, "skipped")
                 return
 
-        repo.set_status(pid, "analyzing")
-
         try:
             # Build budget string for prompt
             bmin = project.get("budget_min") or 0
@@ -135,6 +133,7 @@ async def analysis_dispatcher(
             for project in pending:
                 if shutdown_event.is_set():
                     break
+                repo.set_status(project["project_id"], "analyzing")  # prevent re-pickup before task starts
                 task = asyncio.create_task(_run_call1(project, repo, loop, tagger=tagger))
                 active_tasks.add(task)
                 task.add_done_callback(active_tasks.discard)
